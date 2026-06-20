@@ -13,7 +13,7 @@ import {
   FileText,
 } from 'lucide-react';
 import { useAppStore } from '@/stores';
-import type { Anomaly, AnomalyStatus, ManualResult } from '@shared/types';
+import type { Anomaly, AnomalyStatus, ManualResult, AnomalyType } from '@shared/types';
 
 export default function ReviewList() {
   const { id } = useParams<{ id: string }>();
@@ -33,6 +33,7 @@ export default function ReviewList() {
   const [resolveReason, setResolveReason] = useState('');
   const [resolveResult, setResolveResult] = useState<ManualResult>(null);
   const [reopenReason, setReopenReason] = useState('');
+  const [overrideType, setOverrideType] = useState<AnomalyType | ''>('');
 
   const batch = batches.find((b) => b.id === id);
 
@@ -55,6 +56,7 @@ export default function ReviewList() {
       setResolveReason(anomalyDetail.manual_reason || '');
       setResolveResult(anomalyDetail.manual_result);
       setReopenReason('');
+      setOverrideType('');
     }
   }, [anomalyDetail]);
 
@@ -64,9 +66,15 @@ export default function ReviewList() {
 
   const handleResolve = async () => {
     if (!anomalyDetail || !resolveReason || !resolveResult) return;
-    await resolveAnomaly(anomalyDetail.id, resolveReason, resolveResult);
+    await resolveAnomaly(
+      anomalyDetail.id,
+      resolveReason,
+      resolveResult,
+      overrideType ? overrideType : undefined
+    );
     setResolveReason('');
     setResolveResult(null);
+    setOverrideType('');
   };
 
   const handleReopen = async () => {
@@ -367,6 +375,48 @@ export default function ReviewList() {
                           </button>
                         </div>
                       </div>
+                      {resolveResult === 'confirmed' && (
+                        <div>
+                          <label className="text-sm text-slate-600">
+                            修正异常类型（可选，留空则保留系统识别结果）
+                          </label>
+                          <div className="mt-1 flex gap-2">
+                            {(['over_prep', 'spoilage_suspect'] as const).map((t) => {
+                              const label =
+                                t === 'over_prep' ? '备餐过量' : '变质怀疑';
+                              const original = currentDetail?.anomaly_type === t;
+                              const selected = overrideType
+                                ? overrideType === t
+                                : original;
+                              return (
+                                <button
+                                  key={t}
+                                  type="button"
+                                  onClick={() =>
+                                    setOverrideType(
+                                      original ? '' : (t as AnomalyType)
+                                    )
+                                  }
+                                  className={`flex-1 py-2 rounded border text-sm transition-colors ${
+                                    selected
+                                      ? t === 'over_prep'
+                                        ? 'bg-red-100 border-red-400 text-red-700 font-medium'
+                                        : 'bg-amber-100 border-amber-400 text-amber-700 font-medium'
+                                      : 'bg-white border-slate-200 text-slate-700 hover:bg-slate-50'
+                                  }`}
+                                >
+                                  {label}
+                                  {original && (
+                                    <span className="ml-1 text-[10px] opacity-70">
+                                      （原判定）
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
                       <div>
                         <label className="text-sm text-slate-600">复核原因（必填）</label>
                         <textarea

@@ -4,6 +4,16 @@ import type { Anomaly, Batch, ReviewHistory, Rule, WeighingRecord } from '../../
 
 const router = Router();
 
+function sendCsv(res: Response, csv: string, filenameCn: string, fallback: string) {
+  const encoded = encodeURIComponent(filenameCn);
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8-sig');
+  res.setHeader(
+    'Content-Disposition',
+    `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`
+  );
+  res.send('\ufeff' + csv);
+}
+
 router.get('/summary', (req: Request, res: Response) => {
   const batchIds = (req.query.batch_ids as string)?.split(',') || [];
   if (!batchIds.length) return res.status(400).json({ error: '请选择批次' });
@@ -17,10 +27,8 @@ router.get('/summary', (req: Request, res: Response) => {
     csv += `${b.id},${b.name},${b.import_date},${b.total_records},${b.valid_records},${b.error_records},${b.anomaly_count},${b.unresolved_count},${resolved}\n`;
   });
 
-  const filename = `损耗汇总_${new Date().toISOString().slice(0, 10)}.csv`;
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8-sig');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send('\ufeff' + csv);
+  const date = new Date().toISOString().slice(0, 10);
+  sendCsv(res, csv, `损耗汇总_${date}.csv`, `loss-summary-${date}.csv`);
 });
 
 router.get('/detail', (req: Request, res: Response) => {
@@ -39,17 +47,14 @@ router.get('/detail', (req: Request, res: Response) => {
 
   let csv = '批次ID,异常ID,异常类型,菜品,计划重量(g),实际重量(g),温度(℃),称重时间,规则版本,状态,人工判定,人工原因,创建时间,关闭时间\n';
   anomalies.forEach((a) => {
-    const ev = JSON.parse(a.evidence) as { formula?: string };
     const typeLabel = a.anomaly_type === 'over_prep' ? '备餐过量' : '变质怀疑';
     const statusLabel = a.status === 'unresolved' ? '未结' : '已关闭';
     const resultLabel = a.manual_result === 'confirmed' ? '确认异常' : a.manual_result === 'normal' ? '判定正常' : '';
     csv += `${a.batch_id},${a.id},${typeLabel},${a.dish_name},${a.planned_weight},${a.actual_weight},${a.temperature ?? ''},${a.record_time},${a.rule_version},${statusLabel},${resultLabel},"${(a.manual_reason || '').replace(/"/g, '""')}",${a.created_at},${a.resolved_at || ''}\n`;
   });
 
-  const filename = `损耗明细_${new Date().toISOString().slice(0, 10)}.csv`;
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8-sig');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send('\ufeff' + csv);
+  const date = new Date().toISOString().slice(0, 10);
+  sendCsv(res, csv, `损耗明细_${date}.csv`, `loss-detail-${date}.csv`);
 });
 
 router.get('/history', (req: Request, res: Response) => {
@@ -65,13 +70,11 @@ router.get('/history', (req: Request, res: Response) => {
   history.forEach((h) => {
     const actionLabel = h.action === 'resolve' ? '关闭' : '撤销';
     const resultLabel = h.result === 'confirmed' ? '确认异常' : h.result === 'normal' ? '判定正常' : '';
-    csv += `${h.anomaly_id},${actionLabel},"${h.reason.replace(/"/g, '""')}",${resultLabel},${h.operator},${h.timestamp}\n`;
+    csv += `${h.anomaly_id},${actionLabel},"${(h.reason || '').replace(/"/g, '""')}",${resultLabel},${h.operator},${h.timestamp}\n`;
   });
 
-  const filename = `复核历史_${new Date().toISOString().slice(0, 10)}.csv`;
-  res.setHeader('Content-Type', 'text/csv; charset=utf-8-sig');
-  res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-  res.send('\ufeff' + csv);
+  const date = new Date().toISOString().slice(0, 10);
+  sendCsv(res, csv, `复核历史_${date}.csv`, `review-history-${date}.csv`);
 });
 
 router.get('/consistency', (_req: Request, res: Response) => {

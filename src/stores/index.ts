@@ -3,6 +3,7 @@ import type {
   Anomaly,
   AnomalyDetail,
   AnomalyStatus,
+  AnomalyType,
   Batch,
   ManualResult,
   Rule,
@@ -22,7 +23,7 @@ interface AppState {
   selectBatch: (id: string | null) => void;
   fetchAnomalies: (batchId: string, status?: AnomalyStatus, type?: string) => Promise<void>;
   fetchAnomalyDetail: (id: string) => Promise<void>;
-  resolveAnomaly: (id: string, reason: string, result: ManualResult) => Promise<{ error?: string }>;
+  resolveAnomaly: (id: string, reason: string, result: ManualResult, anomaly_type?: AnomalyType) => Promise<{ error?: string }>;
   reopenAnomaly: (id: string, reason?: string) => Promise<{ error?: string }>;
   createRule: (r: Omit<Rule, 'id' | 'created_at' | 'is_active'>) => Promise<{ error?: string }>;
   activateRule: (id: string) => Promise<void>;
@@ -106,10 +107,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (r.ok) set({ anomalyDetail: await r.json() });
   },
 
-  resolveAnomaly: async (id, reason, result) => {
+  resolveAnomaly: async (id, reason, result, anomaly_type) => {
+    const body: Record<string, unknown> = { reason, result };
+    if (anomaly_type) body.anomaly_type = anomaly_type;
     const r = await api(`/anomalies/${id}/resolve`, {
       method: 'POST',
-      body: JSON.stringify({ reason, result }),
+      body: JSON.stringify(body),
     });
     const data = await r.json();
     if (!r.ok) {

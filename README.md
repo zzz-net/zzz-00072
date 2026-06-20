@@ -24,7 +24,7 @@
 # 安装依赖
 npm install
 
-# 同时启动前端 (Vite 端口 5173) 和后端 (Express 端口 3001)
+# 同时启动前端 (Vite 端口 5173) 和后端 (Express 端口 3002)
 npm run dev
 ```
 

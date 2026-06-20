@@ -55,12 +55,13 @@ app.use(
 /**
  * error handler middleware
  */
-app.use((error: Error, req: Request, res: Response, next: NextFunction) => {
+app.use((error: Error, req: Request, res: Response, _next: NextFunction) => {
+  console.error('[API ERROR]', req.method, req.url, error.message);
   res.status(500).json({
     success: false,
     error: 'Server internal error',
-  })
-})
+  });
+});
 
 /**
  * 404 handler
