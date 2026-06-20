@@ -117,14 +117,21 @@ router.post('/', (req: Request, res: Response) => {
 
 router.post('/:id/activate', (req: Request, res: Response) => {
   try {
-    const result = activateRule(req.params.id);
+    const operator = typeof req.body?.operator === 'string' && req.body.operator.trim() !== '' ? req.body.operator : 'api';
+    const result = activateRule(req.params.id, operator);
     if (!result.success) {
       return res.status(400).json({
         error: result.issues?.[0]?.message || '无法启用该规则',
         issues: result.issues,
       });
     }
-    res.json({ success: true, activated: req.params.id });
+    res.json({
+      success: true,
+      activated: req.params.id,
+      activation_log: result.activation_log,
+      rollback_package: result.rollback_package,
+      rollback_export: result.rollback_export,
+    });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });
   }

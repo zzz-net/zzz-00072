@@ -123,7 +123,7 @@ export function createRule(input: {
   return db.prepare('SELECT * FROM rules WHERE id = ?').get(id) as Rule;
 }
 
-export function activateRule(ruleId: string): { success: boolean; issues?: ValidationIssue[] } {
+export function activateRule(ruleId: string, operator = 'system'): ActivateAndAuditResult {
   const target = db.prepare('SELECT * FROM rules WHERE id = ?').get(ruleId) as Rule | undefined;
   if (!target) {
     return { success: false, issues: [{ message: 'Rule not found (规则不存在)', severity: 'error' }] };
@@ -159,12 +159,8 @@ export function activateRule(ruleId: string): { success: boolean; issues?: Valid
     }
   }
 
-  const tx = db.transaction(() => {
-    db.prepare('UPDATE rules SET is_active = 0 WHERE is_active = 1').run();
-    db.prepare('UPDATE rules SET is_active = 1 WHERE id = ?').run(ruleId);
-  });
-  tx();
-  return { success: true };
+  const currentActiveId = getActiveRuleId();
+  return _activateRuleAndAudit(target, currentActiveId, operator, 'direct', null);
 }
 
 export function listRules(): Rule[] {
@@ -399,6 +395,104 @@ export function getActiveRuleId(): string | null {
   return row?.id ?? null;
 }
 
+interface ActivateAndAuditResult {
+  success: boolean;
+  issues?: ValidationIssue[];
+  activation_log?: RuleActivationLogDetail;
+  rollback_package?: RuleRollbackPackage;
+  rollback_export?: RuleRollbackPackageExport;
+}
+
+function _activateRuleAndAudit(
+  targetRule: Rule,
+  fromRuleId: string | null,
+  operator: string,
+  action: 'activate' | 'direct' | 'rollback',
+  previewId: string | null,
+  logRollbackPackageIdOverride?: string,
+  rollbackExportOverride?: RuleRollbackPackageExport,
+  extraTxSteps?: (ctx: { logId: string; rollbackPkgId: string; now: string }) => void,
+  preActivateTxSteps?: () => void
+): ActivateAndAuditResult {
+  const allRulesSnapshot = listRules();
+  const fromRule = fromRuleId
+    ? (db.prepare('SELECT * FROM rules WHERE id = ?').get(fromRuleId) as Rule | undefined)
+    : null;
+
+  const logId = genId('actlog');
+  const rollbackPkgId = genId('rbpkg');
+
+  let rollbackExport: RuleRollbackPackageExport;
+  if (rollbackExportOverride && action !== 'rollback') {
+    rollbackExport = rollbackExportOverride;
+  } else {
+    rollbackExport = {
+      schema_version: '1.0',
+      package_id: rollbackPkgId,
+      exported_at: new Date().toISOString(),
+      name: `回退包_切回${fromRule?.version ?? '无版本'}_from_${targetRule.version}`,
+      description: `${action === 'direct' ? '直接启用' : action === 'activate' ? '预演确认启用' : '回退恢复'}规则${targetRule.version} 时自动生成的回退包`,
+      original_activation_log_id: logId,
+      from_rule: targetRule,
+      to_rule: fromRule ?? ({} as Rule),
+      all_rules_snapshot: allRulesSnapshot,
+    };
+  }
+
+  const rollbackPackageData = JSON.stringify(rollbackExport);
+  const now = new Date().toISOString();
+
+  const tx = db.transaction(() => {
+    if (preActivateTxSteps) {
+      preActivateTxSteps();
+    }
+
+    db.prepare('UPDATE rules SET is_active = 0 WHERE is_active = 1').run();
+    db.prepare('UPDATE rules SET is_active = 1 WHERE id = ?').run(targetRule.id);
+
+    db.prepare(`
+      INSERT INTO rule_activation_logs (id, preview_id, from_rule_id, to_rule_id, action, operator, rollback_package_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(logId, previewId, fromRuleId, targetRule.id, action, operator, logRollbackPackageIdOverride ?? rollbackPkgId, now);
+
+    db.prepare(`
+      INSERT INTO rule_rollback_packages (id, name, description, package_data, from_activation_log_id, created_at)
+      VALUES (?, ?, ?, ?, ?, ?)
+    `).run(rollbackPkgId, rollbackExport.name, rollbackExport.description ?? null, rollbackPackageData, logId, now);
+
+    if (extraTxSteps) {
+      extraTxSteps({ logId, rollbackPkgId, now });
+    }
+  });
+
+  tx();
+
+  return {
+    success: true,
+    activation_log: {
+      id: logId,
+      preview_id: previewId,
+      from_rule_id: fromRuleId,
+      to_rule_id: targetRule.id,
+      action,
+      operator,
+      rollback_package_id: rollbackPkgId,
+      created_at: now,
+      from_rule: fromRule ?? null,
+      to_rule: targetRule,
+    },
+    rollback_package: {
+      id: rollbackPkgId,
+      name: rollbackExport.name,
+      description: rollbackExport.description ?? null,
+      package_data: rollbackPackageData,
+      from_activation_log_id: logId,
+      created_at: now,
+    },
+    rollback_export: rollbackExport,
+  };
+}
+
 const DIFF_FIELDS: { field: keyof Rule; label: string }[] = [
   { field: 'version', label: '版本号' },
   { field: 'over_prep_threshold_pct', label: '备餐过量阈值(%)' },
@@ -626,85 +720,21 @@ export function confirmRulePreview(previewId: string, operator = 'system'): Conf
     return { success: false, issues: [{ message: '目标规则不存在', severity: 'error' }] };
   }
 
-  const allRulesSnapshot = listRules();
-  const activeRule = currentActiveRuleId
-    ? (db.prepare('SELECT * FROM rules WHERE id = ?').get(currentActiveRuleId) as Rule | undefined)
-    : null;
-
-  const logId = genId('actlog');
-  const rollbackPkgId = genId('rbpkg');
-  const activationLogId = logId;
-
-  const rollbackExport: RuleRollbackPackageExport = {
-    schema_version: '1.0',
-    package_id: rollbackPkgId,
-    exported_at: new Date().toISOString(),
-    name: `回退包_切回${activeRule?.version ?? '无版本'}_from_${targetRule.version}`,
-    description: `启用规则${targetRule.version} 时自动生成的回退包`,
-    original_activation_log_id: activationLogId,
-    from_rule: targetRule,
-    to_rule: activeRule ?? ({} as Rule),
-    all_rules_snapshot: allRulesSnapshot,
-  };
-
-  const rollbackPackageData = JSON.stringify(rollbackExport);
-
-  const tx = db.transaction(() => {
-    db.prepare('UPDATE rules SET is_active = 0 WHERE is_active = 1').run();
-    db.prepare('UPDATE rules SET is_active = 1 WHERE id = ?').run(row.target_rule_id);
-
-    db.prepare(`UPDATE rule_previews SET status = 'confirmed', confirmed_at = ? WHERE id = ?`).run(
-      new Date().toISOString(),
-      previewId
-    );
-
-    db.prepare(`
-      INSERT INTO rule_activation_logs (id, preview_id, from_rule_id, to_rule_id, action, operator, rollback_package_id, created_at)
-      VALUES (?, ?, ?, ?, 'activate', ?, ?, ?)
-    `).run(
-      logId,
-      previewId,
-      currentActiveRuleId,
-      row.target_rule_id,
-      operator,
-      rollbackPkgId,
-      new Date().toISOString()
-    );
-
-    db.prepare(`
-      INSERT INTO rule_rollback_packages (id, name, description, package_data, from_activation_log_id, created_at)
-      VALUES (?, ?, ?, ?, ?, ?)
-    `).run(
-      rollbackPkgId,
-      rollbackExport.name,
-      rollbackExport.description,
-      rollbackPackageData,
-      logId,
-      new Date().toISOString()
-    );
-  });
-
-  tx();
-
-  const logRow = db.prepare('SELECT * FROM rule_activation_logs WHERE id = ?').get(logId) as RuleActivationLog;
-
-  return {
-    success: true,
-    activation_log: {
-      ...logRow,
-      from_rule: activeRule ?? null,
-      to_rule: targetRule,
+  const result = _activateRuleAndAudit(
+    targetRule,
+    currentActiveRuleId,
+    operator,
+    'activate',
+    previewId,
+    undefined,
+    undefined,
+    ({ now }) => {
+      db.prepare(`UPDATE rule_previews SET status = 'confirmed', confirmed_at = ? WHERE id = ?`).run(now, previewId);
     },
-    rollback_package: {
-      id: rollbackPkgId,
-      name: rollbackExport.name,
-      description: rollbackExport.description ?? null,
-      package_data: rollbackPackageData,
-      from_activation_log_id: logId,
-      created_at: new Date().toISOString(),
-    },
-    rollback_export: rollbackExport,
-  };
+    undefined
+  );
+
+  return result as ConfirmPreviewResult;
 }
 
 export function listActivationLogs(limit = 50): RuleActivationLogDetail[] {
@@ -817,11 +847,30 @@ export function applyRollbackPackage(pkg: RuleRollbackPackageExport, operator = 
     return { success: false, issues: validation.issues };
   }
 
-  const currentActiveId = getActiveRuleId();
-  const targetRule = validation.parsed!.to_rule;
+  const parsedPkg = validation.parsed!;
 
-  const tx = db.transaction(() => {
-    for (const rule of validation.parsed!.all_rules_snapshot) {
+  const versionConflictIssues: ValidationIssue[] = [];
+  for (const rule of parsedPkg.all_rules_snapshot) {
+    const otherWithSameVersion = db
+      .prepare('SELECT id, version FROM rules WHERE version = ? AND id != ?')
+      .get(rule.version, rule.id) as { id: string; version: string } | undefined;
+    if (otherWithSameVersion) {
+      versionConflictIssues.push({
+        field: 'version',
+        message: `回退包中规则"${rule.version}"与数据库中已有规则 id=${otherWithSameVersion.id} 的版本号冲突，无法恢复`,
+        severity: 'error',
+      });
+    }
+  }
+  if (versionConflictIssues.length > 0) {
+    return { success: false, issues: versionConflictIssues };
+  }
+
+  const currentActiveId = getActiveRuleId();
+  const targetRule = parsedPkg.to_rule;
+
+  const preActivateSteps = () => {
+    for (const rule of parsedPkg.all_rules_snapshot) {
       const existing = db.prepare('SELECT id FROM rules WHERE id = ?').get(rule.id) as { id: string } | undefined;
       if (existing) {
         db.prepare(`
@@ -858,42 +907,27 @@ export function applyRollbackPackage(pkg: RuleRollbackPackageExport, operator = 
         );
       }
     }
+  };
 
-    db.prepare('UPDATE rules SET is_active = 0 WHERE is_active = 1').run();
-    db.prepare('UPDATE rules SET is_active = 1 WHERE id = ?').run(targetRule.id);
+  const result = _activateRuleAndAudit(
+    targetRule,
+    currentActiveId,
+    operator,
+    'rollback',
+    null,
+    parsedPkg.package_id,
+    undefined,
+    undefined,
+    preActivateSteps
+  );
 
-    const logId = genId('actlog');
-    db.prepare(`
-      INSERT INTO rule_activation_logs (id, preview_id, from_rule_id, to_rule_id, action, operator, rollback_package_id, created_at)
-      VALUES (?, NULL, ?, ?, 'rollback', ?, ?, ?)
-    `).run(
-      logId,
-      currentActiveId,
-      targetRule.id,
-      operator,
-      validation.parsed!.package_id,
-      new Date().toISOString()
-    );
-  });
-
-  tx();
-
-  const latestLog = db.prepare(`
-    SELECT * FROM rule_activation_logs ORDER BY created_at DESC LIMIT 1
-  `).get() as RuleActivationLog;
-
-  const toRule = db.prepare('SELECT * FROM rules WHERE id = ?').get(latestLog.to_rule_id) as Rule;
-  const fromRule = latestLog.from_rule_id
-    ? (db.prepare('SELECT * FROM rules WHERE id = ?').get(latestLog.from_rule_id) as Rule | undefined)
-    : null;
+  if (!result.success) {
+    return { success: false, issues: result.issues };
+  }
 
   return {
     success: true,
-    activation_log: {
-      ...latestLog,
-      from_rule: fromRule ?? null,
-      to_rule: toRule,
-    },
+    activation_log: result.activation_log,
   };
 }
 
