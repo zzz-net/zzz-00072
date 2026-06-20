@@ -9,6 +9,24 @@ import type {
   Rule,
 } from '@shared/types';
 
+interface ValidationIssue {
+  field?: string;
+  message: string;
+  severity: 'error' | 'warning';
+}
+
+interface ValidationResult {
+  valid: boolean;
+  issues: ValidationIssue[];
+  rules?: Rule[];
+}
+
+interface ImportResult {
+  imported: Rule[];
+  warnings: ValidationIssue[];
+  count: number;
+}
+
 interface AppState {
   batches: Batch[];
   rules: Rule[];
@@ -16,6 +34,7 @@ interface AppState {
   anomalies: Anomaly[];
   anomalyDetail: AnomalyDetail | null;
   consistency: { ok: boolean; issues: string[]; stats: unknown } | null;
+  lastValidation: ValidationResult | null;
   fetchBatches: () => Promise<void>;
   fetchRules: () => Promise<void>;
   importSample: () => Promise<{ error?: string }>;
@@ -25,9 +44,13 @@ interface AppState {
   fetchAnomalyDetail: (id: string) => Promise<void>;
   resolveAnomaly: (id: string, reason: string, result: ManualResult, anomaly_type?: AnomalyType) => Promise<{ error?: string }>;
   reopenAnomaly: (id: string, reason?: string) => Promise<{ error?: string }>;
-  createRule: (r: Omit<Rule, 'id' | 'created_at' | 'is_active'>) => Promise<{ error?: string }>;
+  createRule: (r: Omit<Rule, 'id' | 'created_at' | 'is_active'>) => Promise<{ error?: string; issues?: ValidationIssue[] }>;
   activateRule: (id: string) => Promise<void>;
   checkConsistency: () => Promise<void>;
+  exportRules: () => Promise<void>;
+  validateRulePackage: (pkg: unknown) => Promise<ValidationResult>;
+  importRulePackage: (pkg: unknown, activateFirst?: boolean) => Promise<{ error?: string; issues?: ValidationIssue[]; result?: ImportResult }>;
+  setLastValidation: (v: ValidationResult | null) => void;
   toast: { msg: string; type: 'success' | 'error' | 'info' } | null;
   setToast: (t: { msg: string; type: 'success' | 'error' | 'info' } | null) => void;
 }
@@ -45,6 +68,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   anomalies: [],
   anomalyDetail: null,
   consistency: null,
+  lastValidation: null,
   toast: null,
 
   setToast: (t) => {
@@ -169,5 +193,73 @@ export const useAppStore = create<AppState>((set, get) => ({
       if (data.ok) get().setToast({ msg: '数据一致性校验通过', type: 'success' });
       else get().setToast({ msg: `发现 ${data.issues.length} 个数据不一致问题`, type: 'error' });
     }
+  },
+
+  setLastValidation: (v) => set({ lastValidation: v }),
+
+  exportRules: async () => {
+    try {
+      const r = await fetch('/api/rules/export');
+      if (!r.ok) {
+        get().setToast({ msg: '导出失败', type: 'error' });
+        return;
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = r.headers.get('Content-Disposition');
+      let filename = `rules_${new Date().toISOString().slice(0, 10)}.json`;
+      if (cd) {
+        const match = cd.match(/filename="?([^"]+)"?/);
+        if (match) filename = match[1];
+      }
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      get().setToast({ msg: '规则已导出为 JSON 文件', type: 'success' });
+    } catch {
+      get().setToast({ msg: '导出失败', type: 'error' });
+    }
+  },
+
+  validateRulePackage: async (pkg) => {
+    const r = await api('/rules/validate', {
+      method: 'POST',
+      body: JSON.stringify(pkg),
+    });
+    const data = (await r.json()) as ValidationResult;
+    set({ lastValidation: data });
+    return data;
+  },
+
+  importRulePackage: async (pkg, activateFirst = false) => {
+    const validation = await get().validateRulePackage(pkg);
+    if (!validation.valid) {
+      return {
+        error: '规则校验失败，请查看问题列表',
+        issues: validation.issues,
+      };
+    }
+    const qs = activateFirst ? '?activate=1' : '';
+    const r = await api(`/rules/import${qs}`, {
+      method: 'POST',
+      body: JSON.stringify(pkg),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '导入失败', type: 'error' });
+      return { error: data.error, issues: data.issues };
+    }
+    await get().fetchRules();
+    const warnings = (data.warnings || []) as ValidationIssue[];
+    if (warnings.length > 0) {
+      get().setToast({ msg: `已导入 ${data.count} 条规则，存在 ${warnings.length} 条警告`, type: 'info' });
+    } else {
+      get().setToast({ msg: `成功导入 ${data.count} 条规则${activateFirst ? '并已生效' : ''}`, type: 'success' });
+    }
+    return { result: data as ImportResult };
   },
 }));
