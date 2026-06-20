@@ -69,3 +69,69 @@ export interface AnomalyDetail extends Anomaly {
   rule: Rule;
   history: ReviewHistory[];
 }
+
+export type RulePreviewStatus = 'pending' | 'confirmed' | 'expired' | 'cancelled';
+
+export interface RulePreview {
+  id: string;
+  target_rule_id: string;
+  from_active_rule_id: string | null;
+  snapshot: string;
+  status: RulePreviewStatus;
+  expires_at: string;
+  created_at: string;
+  confirmed_at: string | null;
+}
+
+export interface RulePreviewDetail extends RulePreview {
+  target_rule: Rule;
+  from_active_rule: Rule | null;
+  diff: {
+    changes: {
+      field: string;
+      label: string;
+      old_value: string | number | null;
+      new_value: string | number | null;
+      direction: 'added' | 'removed' | 'modified';
+    }[];
+  };
+}
+
+export type RuleActivationAction = 'activate' | 'rollback' | 'direct';
+
+export interface RuleActivationLog {
+  id: string;
+  preview_id: string | null;
+  from_rule_id: string | null;
+  to_rule_id: string;
+  action: RuleActivationAction;
+  operator: string;
+  rollback_package_id: string | null;
+  created_at: string;
+}
+
+export interface RuleActivationLogDetail extends RuleActivationLog {
+  from_rule: Rule | null;
+  to_rule: Rule;
+}
+
+export interface RuleRollbackPackage {
+  id: string;
+  name: string;
+  description: string | null;
+  package_data: string;
+  from_activation_log_id: string | null;
+  created_at: string;
+}
+
+export interface RuleRollbackPackageExport {
+  schema_version: string;
+  package_id: string;
+  exported_at: string;
+  name: string;
+  description: string | null;
+  original_activation_log_id: string | null;
+  from_rule: Rule | null;
+  to_rule: Rule;
+  all_rules_snapshot: Rule[];
+}

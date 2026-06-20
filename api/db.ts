@@ -87,6 +87,47 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_anomalies_batch ON anomalies(batch_id);
     CREATE INDEX IF NOT EXISTS idx_anomalies_status ON anomalies(status);
     CREATE INDEX IF NOT EXISTS idx_history_anomaly ON review_history(anomaly_id);
+
+    CREATE TABLE IF NOT EXISTS rule_previews (
+      id TEXT PRIMARY KEY,
+      target_rule_id TEXT NOT NULL,
+      from_active_rule_id TEXT,
+      snapshot TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      confirmed_at TEXT,
+      FOREIGN KEY (target_rule_id) REFERENCES rules(id),
+      FOREIGN KEY (from_active_rule_id) REFERENCES rules(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rule_activation_logs (
+      id TEXT PRIMARY KEY,
+      preview_id TEXT,
+      from_rule_id TEXT,
+      to_rule_id TEXT NOT NULL,
+      action TEXT NOT NULL,
+      operator TEXT NOT NULL DEFAULT 'system',
+      rollback_package_id TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (preview_id) REFERENCES rule_previews(id),
+      FOREIGN KEY (from_rule_id) REFERENCES rules(id),
+      FOREIGN KEY (to_rule_id) REFERENCES rules(id)
+    );
+
+    CREATE TABLE IF NOT EXISTS rule_rollback_packages (
+      id TEXT PRIMARY KEY,
+      name TEXT NOT NULL,
+      description TEXT,
+      package_data TEXT NOT NULL,
+      from_activation_log_id TEXT,
+      created_at TEXT NOT NULL,
+      FOREIGN KEY (from_activation_log_id) REFERENCES rule_activation_logs(id)
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_previews_status ON rule_previews(status);
+    CREATE INDEX IF NOT EXISTS idx_activation_logs_created ON rule_activation_logs(created_at);
+    CREATE INDEX IF NOT EXISTS idx_rollback_packages_created ON rule_rollback_packages(created_at);
   `);
 
   const ruleCount = db.prepare('SELECT COUNT(*) as cnt FROM rules').get() as { cnt: number };

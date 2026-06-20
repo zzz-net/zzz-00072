@@ -7,6 +7,10 @@ import type {
   Batch,
   ManualResult,
   Rule,
+  RulePreviewDetail,
+  RuleActivationLogDetail,
+  RuleRollbackPackage,
+  RuleRollbackPackageExport,
 } from '@shared/types';
 
 interface ValidationIssue {
@@ -27,6 +31,17 @@ interface ImportResult {
   count: number;
 }
 
+interface RollbackValidationResult extends ValidationResult {
+  parsed?: RuleRollbackPackageExport;
+}
+
+interface ConfirmPreviewResult {
+  success: boolean;
+  activation_log?: RuleActivationLogDetail;
+  rollback_package?: RuleRollbackPackage;
+  rollback_export?: RuleRollbackPackageExport;
+}
+
 interface AppState {
   batches: Batch[];
   rules: Rule[];
@@ -35,6 +50,10 @@ interface AppState {
   anomalyDetail: AnomalyDetail | null;
   consistency: { ok: boolean; issues: string[]; stats: unknown } | null;
   lastValidation: ValidationResult | null;
+  rulePreviews: RulePreviewDetail[];
+  activationLogs: RuleActivationLogDetail[];
+  rollbackPackages: RuleRollbackPackage[];
+  currentPreview: RulePreviewDetail | null;
   fetchBatches: () => Promise<void>;
   fetchRules: () => Promise<void>;
   importSample: () => Promise<{ error?: string }>;
@@ -51,6 +70,16 @@ interface AppState {
   validateRulePackage: (pkg: unknown) => Promise<ValidationResult>;
   importRulePackage: (pkg: unknown, activateFirst?: boolean) => Promise<{ error?: string; issues?: ValidationIssue[]; result?: ImportResult }>;
   setLastValidation: (v: ValidationResult | null) => void;
+  createRulePreview: (ruleId: string) => Promise<{ error?: string; preview?: RulePreviewDetail }>;
+  fetchRulePreviews: () => Promise<void>;
+  confirmRulePreview: (previewId: string) => Promise<{ error?: string; result?: ConfirmPreviewResult }>;
+  cancelRulePreview: (previewId: string) => Promise<{ error?: string }>;
+  fetchActivationLogs: () => Promise<void>;
+  fetchRollbackPackages: () => Promise<void>;
+  exportRollbackPackage: (packageId: string) => Promise<void>;
+  validateRollbackPackage: (pkg: unknown) => Promise<RollbackValidationResult>;
+  applyRollbackPackage: (pkg: RuleRollbackPackageExport) => Promise<{ error?: string; log?: RuleActivationLogDetail }>;
+  setCurrentPreview: (p: RulePreviewDetail | null) => void;
   toast: { msg: string; type: 'success' | 'error' | 'info' } | null;
   setToast: (t: { msg: string; type: 'success' | 'error' | 'info' } | null) => void;
 }
@@ -69,6 +98,10 @@ export const useAppStore = create<AppState>((set, get) => ({
   anomalyDetail: null,
   consistency: null,
   lastValidation: null,
+  rulePreviews: [],
+  activationLogs: [],
+  rollbackPackages: [],
+  currentPreview: null,
   toast: null,
 
   setToast: (t) => {
@@ -187,6 +220,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     await get().fetchRules();
+    await get().fetchActivationLogs();
     get().setToast({ msg: '已切换生效规则', type: 'success' });
   },
 
@@ -267,4 +301,116 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     return { result: data as ImportResult };
   },
+
+  createRulePreview: async (ruleId) => {
+    const r = await api(`/rules/${ruleId}/preview`, { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '预演创建失败', type: 'error' });
+      return { error: data.error };
+    }
+    set({ currentPreview: data as RulePreviewDetail });
+    await get().fetchRulePreviews();
+    get().setToast({ msg: '已生成变更预演，请确认后再启用', type: 'info' });
+    return { preview: data as RulePreviewDetail };
+  },
+
+  fetchRulePreviews: async () => {
+    const r = await api('/rules/previews');
+    if (r.ok) set({ rulePreviews: await r.json() });
+  },
+
+  confirmRulePreview: async (previewId) => {
+    const r = await api(`/rules/previews/${previewId}/confirm`, { method: 'POST', body: '{}' });
+    const data = await r.json();
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '确认启用失败', type: 'error' });
+      return { error: data.error };
+    }
+    set({ currentPreview: null });
+    await get().fetchRules();
+    await get().fetchRulePreviews();
+    await get().fetchActivationLogs();
+    await get().fetchRollbackPackages();
+    get().setToast({ msg: '规则已生效，已自动生成回退包', type: 'success' });
+    return { result: data as ConfirmPreviewResult };
+  },
+
+  cancelRulePreview: async (previewId) => {
+    const r = await api(`/rules/previews/${previewId}/cancel`, { method: 'POST' });
+    const data = await r.json();
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '取消预演失败', type: 'error' });
+      return { error: data.error };
+    }
+    set({ currentPreview: null });
+    await get().fetchRulePreviews();
+    get().setToast({ msg: '已取消预演', type: 'info' });
+    return {};
+  },
+
+  fetchActivationLogs: async () => {
+    const r = await api('/rules/activation-logs');
+    if (r.ok) set({ activationLogs: await r.json() });
+  },
+
+  fetchRollbackPackages: async () => {
+    const r = await api('/rules/rollback-packages');
+    if (r.ok) set({ rollbackPackages: await r.json() });
+  },
+
+  exportRollbackPackage: async (packageId) => {
+    try {
+      const r = await fetch(`/api/rules/rollback-packages/${packageId}/export`);
+      if (!r.ok) {
+        get().setToast({ msg: '回退包导出失败', type: 'error' });
+        return;
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = r.headers.get('Content-Disposition');
+      let filename = `rollback_${packageId.slice(-8)}.json`;
+      if (cd) {
+        const match = cd.match(/filename="?([^"]+)"?/);
+        if (match) filename = match[1];
+      }
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      get().setToast({ msg: '回退包已导出', type: 'success' });
+    } catch {
+      get().setToast({ msg: '回退包导出失败', type: 'error' });
+    }
+  },
+
+  validateRollbackPackage: async (pkg) => {
+    const r = await api('/rules/rollback-packages/validate', {
+      method: 'POST',
+      body: JSON.stringify(pkg),
+    });
+    return (await r.json()) as RollbackValidationResult;
+  },
+
+  applyRollbackPackage: async (pkg) => {
+    const r = await api('/rules/rollback-packages/apply', {
+      method: 'POST',
+      body: JSON.stringify(pkg),
+    });
+    const data = await r.json();
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '应用回退包失败', type: 'error' });
+      return { error: data.error };
+    }
+    await get().fetchRules();
+    await get().fetchActivationLogs();
+    await get().fetchRollbackPackages();
+    get().setToast({ msg: '已成功回退到目标版本', type: 'success' });
+    return { log: data.activation_log as RuleActivationLogDetail };
+  },
+
+  setCurrentPreview: (p) => set({ currentPreview: p }),
 }));
