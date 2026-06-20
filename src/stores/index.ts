@@ -29,6 +29,10 @@ interface ImportResult {
   imported: Rule[];
   warnings: ValidationIssue[];
   count: number;
+  activated?: string;
+  activation_log?: RuleActivationLogDetail;
+  rollback_package?: RuleRollbackPackage;
+  rollback_export?: RuleRollbackPackageExport;
 }
 
 interface RollbackValidationResult extends ValidationResult {
@@ -285,7 +289,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     const qs = activateFirst ? '?activate=1' : '';
     const r = await api(`/rules/import${qs}`, {
       method: 'POST',
-      body: JSON.stringify(pkg),
+      body: JSON.stringify({ ...(pkg as Record<string, unknown>), operator: 'frontend_user' }),
     });
     const data = await r.json();
     if (!r.ok) {
@@ -293,6 +297,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { error: data.error, issues: data.issues };
     }
     await get().fetchRules();
+    if (activateFirst) {
+      await get().fetchActivationLogs();
+      await get().fetchRollbackPackages();
+    }
     const warnings = (data.warnings || []) as ValidationIssue[];
     if (warnings.length > 0) {
       get().setToast({ msg: `已导入 ${data.count} 条规则，存在 ${warnings.length} 条警告`, type: 'info' });

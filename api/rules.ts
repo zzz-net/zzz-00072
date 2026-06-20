@@ -348,8 +348,15 @@ export function exportRules(): RuleExportPackage {
 
 export function importRules(
   pkg: RuleExportPackage,
-  activateFirst = false
-): { imported: Rule[]; issues: ValidationIssue[] } {
+  activateFirst = false,
+  operator = 'import_api'
+): {
+  imported: Rule[];
+  issues: ValidationIssue[];
+  activation_log?: RuleActivationLogDetail;
+  rollback_package?: RuleRollbackPackage;
+  rollback_export?: RuleRollbackPackageExport;
+} {
   const validation = validateRulePackage(pkg, true);
   if (!validation.valid) {
     return { imported: [], issues: validation.issues };
@@ -377,15 +384,31 @@ export function importRules(
       const inserted = db.prepare('SELECT * FROM rules WHERE id = ?').get(id) as Rule;
       imported.push(inserted);
     }
-
-    if (activateFirst && imported.length > 0) {
-      db.prepare('UPDATE rules SET is_active = 0 WHERE is_active = 1').run();
-      db.prepare('UPDATE rules SET is_active = 1 WHERE id = ?').run(imported[0].id);
-      imported[0].is_active = true;
-    }
   });
 
   tx();
+
+  if (activateFirst && imported.length > 0) {
+    const activateResult = activateRule(imported[0].id, operator);
+    if (!activateResult.success) {
+      const rollbackTx = db.transaction(() => {
+        for (const r of imported) {
+          db.prepare('DELETE FROM rules WHERE id = ?').run(r.id);
+        }
+      });
+      rollbackTx();
+      return { imported: [], issues: activateResult.issues ?? [] };
+    }
+    const active = db.prepare('SELECT * FROM rules WHERE id = ?').get(imported[0].id) as Rule;
+    imported[0] = active;
+    return {
+      imported,
+      issues: validation.issues.filter((i) => i.severity === 'warning'),
+      activation_log: activateResult.activation_log,
+      rollback_package: activateResult.rollback_package,
+      rollback_export: activateResult.rollback_export,
+    };
+  }
 
   return { imported, issues: validation.issues.filter((i) => i.severity === 'warning') };
 }

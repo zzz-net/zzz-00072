@@ -56,6 +56,9 @@ router.post('/import', (req: Request, res: Response) => {
   try {
     const pkg = req.body as RuleExportPackage;
     const activateFirst = req.query.activate === '1';
+    const operator = typeof req.body?.operator === 'string' && req.body.operator.trim() !== ''
+      ? req.body.operator
+      : 'import_api';
 
     const preValidation = validateRulePackage(pkg, true);
     if (!preValidation.valid) {
@@ -65,19 +68,26 @@ router.post('/import', (req: Request, res: Response) => {
       });
     }
 
-    const result = importRules(pkg, activateFirst);
+    const result = importRules(pkg, activateFirst, operator);
     if (result.imported.length === 0) {
       return res.status(400).json({
-        error: '没有可导入的规则',
+        error: '没有可导入的规则或导入后启用校验失败',
         issues: result.issues,
       });
     }
 
-    res.json({
+    const body: Record<string, unknown> = {
       imported: result.imported,
       warnings: result.issues,
       count: result.imported.length,
-    });
+    };
+    if (activateFirst) {
+      body.activated = result.imported[0].id;
+      body.activation_log = result.activation_log;
+      body.rollback_package = result.rollback_package;
+      body.rollback_export = result.rollback_export;
+    }
+    res.json(body);
   } catch (err) {
     if ((err as Error).message.includes('UNIQUE constraint')) {
       return res.status(409).json({ error: '版本号已存在' });
