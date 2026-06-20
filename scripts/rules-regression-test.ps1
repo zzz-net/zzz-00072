@@ -145,9 +145,9 @@ try {
   $FAIL += 2
 }
 
-# ===== 6. Validate: Description conflict warning =====
-Write-Host "`n[6] Validate Package with Description Conflict (Warning)"
-$warnPkg = @{
+# ===== 6. Validate: Description conflict is error (blocks import/activation) =====
+Write-Host "`n[6] Validate Package with Description Conflict (Error)"
+$badPkg5 = @{
   schema_version = "1.0"
   rules = @(
     @{
@@ -169,10 +169,10 @@ $warnPkg = @{
   )
 } | ConvertTo-Json -Depth 5
 try {
-  $v5 = Invoke-RestMethod "$BaseUrl/api/rules/validate" -Method Post -Body $warnPkg -ContentType "application/json"
-  TestStep "Description conflict: valid = true (only warning)" ($v5.valid -eq $true)
-  $hasWarn = $v5.issues | Where-Object { $_.severity -eq 'warning' }
-  TestStep "Description conflict: has warning" ($null -ne $hasWarn)
+  $v5 = Invoke-RestMethod "$BaseUrl/api/rules/validate" -Method Post -Body $badPkg5 -ContentType "application/json"
+  TestStep "Description conflict: valid = false (error, not warning)" ($v5.valid -eq $false)
+  $hasDescErr = $v5.issues | Where-Object { $_.severity -eq 'error' -and $_.field -eq 'description' }
+  TestStep "Description conflict: has error on description field" ($null -ne $hasDescErr)
 } catch {
   Write-Host "[FAIL] Description conflict validation exception: $($_.Exception.Message)" -ForegroundColor Red
   $FAIL += 2

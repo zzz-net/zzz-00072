@@ -107,12 +107,13 @@ router.post('/', (req: Request, res: Response) => {
 
 router.post('/:id/activate', (req: Request, res: Response) => {
   try {
-    const existing = listRules();
-    const target = existing.find((r) => r.id === req.params.id);
-    if (!target) {
-      return res.status(404).json({ error: '规则不存在' });
+    const result = activateRule(req.params.id);
+    if (!result.success) {
+      return res.status(400).json({
+        error: result.issues?.[0]?.message || '无法启用该规则',
+        issues: result.issues,
+      });
     }
-    activateRule(req.params.id);
     res.json({ success: true, activated: req.params.id });
   } catch (err) {
     res.status(500).json({ error: (err as Error).message });

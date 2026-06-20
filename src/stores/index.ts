@@ -180,7 +180,12 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   activateRule: async (id) => {
-    await api(`/rules/${id}/activate`, { method: 'POST' });
+    const resp = await api(`/rules/${id}/activate`, { method: 'POST' });
+    const data = await resp.json();
+    if (!resp.ok) {
+      get().setToast({ msg: data.error || '启用规则失败', type: 'error' });
+      return;
+    }
     await get().fetchRules();
     get().setToast({ msg: '已切换生效规则', type: 'success' });
   },

@@ -112,12 +112,48 @@ export function createRule(input: {
   return db.prepare('SELECT * FROM rules WHERE id = ?').get(id) as Rule;
 }
 
-export function activateRule(ruleId: string): void {
+export function activateRule(ruleId: string): { success: boolean; issues?: ValidationIssue[] } {
+  const target = db.prepare('SELECT * FROM rules WHERE id = ?').get(ruleId) as Rule | undefined;
+  if (!target) {
+    return { success: false, issues: [{ message: 'Rule not found (规则不存在)', severity: 'error' }] };
+  }
+
+  const selfValidation = validateRuleInput(target, false);
+  if (!selfValidation.valid) {
+    return { success: false, issues: selfValidation.issues };
+  }
+
+  if (target.description && target.description.trim() !== '') {
+    const conflicts = db
+      .prepare('SELECT * FROM rules WHERE description = ? AND id != ?')
+      .all(target.description, ruleId) as Rule[];
+    for (const other of conflicts) {
+      const differs =
+        Number(other.over_prep_threshold_pct) !== Number(target.over_prep_threshold_pct) ||
+        Number(other.over_prep_threshold_abs) !== Number(target.over_prep_threshold_abs) ||
+        Number(other.spoilage_temp_min) !== Number(target.spoilage_temp_min) ||
+        Number(other.spoilage_temp_max) !== Number(target.spoilage_temp_max);
+      if (differs) {
+        return {
+          success: false,
+          issues: [
+            {
+              field: 'description',
+              message: `Cannot activate: same description as rule "${other.version}" but different thresholds (与已有规则描述重复但阈值不一致，无法启用): "${target.description}"`,
+              severity: 'error',
+            },
+          ],
+        };
+      }
+    }
+  }
+
   const tx = db.transaction(() => {
     db.prepare('UPDATE rules SET is_active = 0 WHERE is_active = 1').run();
     db.prepare('UPDATE rules SET is_active = 1 WHERE id = ?').run(ruleId);
   });
   tx();
+  return { success: true };
 }
 
 export function listRules(): Rule[] {
@@ -179,6 +215,26 @@ export function validateRuleInput(input: Partial<Rule>, checkDbDuplicates = true
   if (input.description !== undefined && input.description !== null) {
     if (typeof input.description !== 'string') {
       issues.push({ field: 'description', message: 'Description must be a string (规则描述必须是字符串)', severity: 'error' });
+    } else if (checkDbDuplicates && input.description.trim() !== '') {
+      const dbRows = db
+        .prepare('SELECT * FROM rules WHERE description = ?')
+        .all(input.description) as Rule[];
+      for (const dbRule of dbRows) {
+        if (input.version && dbRule.version === input.version) continue;
+        const differs =
+          Number(dbRule.over_prep_threshold_pct) !== Number(input.over_prep_threshold_pct) ||
+          Number(dbRule.over_prep_threshold_abs) !== Number(input.over_prep_threshold_abs) ||
+          Number(dbRule.spoilage_temp_min) !== Number(input.spoilage_temp_min) ||
+          Number(dbRule.spoilage_temp_max) !== Number(input.spoilage_temp_max);
+        if (differs) {
+          issues.push({
+            field: 'description',
+            message: `Same description as existing rule "${dbRule.version}" but different thresholds (与已有规则描述重复但阈值不一致): "${input.description}"`,
+            severity: 'error',
+          });
+          break;
+        }
+      }
     }
   }
 
@@ -253,8 +309,8 @@ export function validateRulePackage(
         if (differs) {
           issues.push({
             field: 'description',
-            message: `Rule[${idx}]: same description but different thresholds (说明文字重复但内容不一致): "${rule.description}"`,
-            severity: 'warning',
+            message: `Rule[${idx}]: same description but different thresholds in package (说明文字重复但内容不一致): "${rule.description}"`,
+            severity: 'error',
           });
         }
       } else {
