@@ -26,6 +26,7 @@ export default function ReviewList() {
     resolveAnomaly,
     reopenAnomaly,
     fetchBatches,
+    selectBatch,
   } = useAppStore();
 
   const [statusFilter, setStatusFilter] = useState<AnomalyStatus | 'all'>('all');
@@ -43,13 +44,14 @@ export default function ReviewList() {
 
   useEffect(() => {
     if (id) {
+      selectBatch(id);
       fetchAnomalies(
         id,
         statusFilter === 'all' ? undefined : statusFilter,
         typeFilter === 'all' ? undefined : typeFilter
       );
     }
-  }, [id, statusFilter, typeFilter, fetchAnomalies]);
+  }, [id, statusFilter, typeFilter, selectBatch, fetchAnomalies]);
 
   useEffect(() => {
     if (anomalyDetail) {
@@ -66,12 +68,22 @@ export default function ReviewList() {
 
   const handleResolve = async () => {
     if (!anomalyDetail || !resolveReason || !resolveResult) return;
-    await resolveAnomaly(
+    const r = await resolveAnomaly(
       anomalyDetail.id,
       resolveReason,
       resolveResult,
       overrideType ? overrideType : undefined
     );
+    if (!r.error) {
+      await Promise.all([
+        fetchAnomalies(
+          id,
+          statusFilter === 'all' ? undefined : statusFilter,
+          typeFilter === 'all' ? undefined : typeFilter
+        ),
+        fetchAnomalyDetail(anomalyDetail.id),
+      ]);
+    }
     setResolveReason('');
     setResolveResult(null);
     setOverrideType('');
@@ -79,7 +91,18 @@ export default function ReviewList() {
 
   const handleReopen = async () => {
     if (!anomalyDetail) return;
-    await reopenAnomaly(anomalyDetail.id, reopenReason || undefined);
+    const r = await reopenAnomaly(anomalyDetail.id, reopenReason || undefined);
+    if (!r.error) {
+      await Promise.all([
+        fetchAnomalies(
+          id,
+          statusFilter === 'all' ? undefined : statusFilter,
+          typeFilter === 'all' ? undefined : typeFilter
+        ),
+        fetchAnomalyDetail(anomalyDetail.id),
+      ]);
+    }
+    setReopenReason('');
   };
 
   const anomalyTypeBadge = (t: string) => {

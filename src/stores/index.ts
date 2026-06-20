@@ -120,17 +120,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { error: data.error };
     }
     get().setToast({ msg: '已完成人工复核', type: 'success' });
-    const { selectedBatchId, anomalies } = get();
-    if (selectedBatchId) {
-      const idx = anomalies.findIndex((a) => a.id === id);
-      if (idx >= 0) {
-        const updated = [...anomalies];
-        updated[idx] = data;
-        set({ anomalies: updated, anomalyDetail: null });
-      }
+    if (get().selectedBatchId) {
       await get().fetchBatches();
     }
-    return {};
+    return { data };
   },
 
   reopenAnomaly: async (id, reason) => {
@@ -144,17 +137,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { error: data.error };
     }
     get().setToast({ msg: '已撤销关闭，恢复为未结', type: 'info' });
-    const { selectedBatchId, anomalies } = get();
-    if (selectedBatchId) {
-      const idx = anomalies.findIndex((a) => a.id === id);
-      if (idx >= 0) {
-        const updated = [...anomalies];
-        updated[idx] = data;
-        set({ anomalies: updated, anomalyDetail: null });
-      }
+    if (get().selectedBatchId) {
       await get().fetchBatches();
     }
-    return {};
+    return { data };
   },
 
   createRule: async (r) => {
