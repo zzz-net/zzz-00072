@@ -186,6 +186,17 @@ export interface BatchOperationRecord {
   timestamp: string;
 }
 
+export interface OperationLog {
+  id: string;
+  action: string;
+  target_type: string;
+  target_id: string | null;
+  detail: string | null;
+  operator: string;
+  filter_snapshot: string | null;
+  timestamp: string;
+}
+
 export interface AnomalyDetail extends Anomaly {
   record: WeighingRecord;
   rule: Rule;

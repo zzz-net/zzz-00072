@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { db } from '../db';
-import type { Anomaly, Batch, ReviewHistory, Rule, WeighingRecord } from '../../shared/types';
+import type { Anomaly, Batch, BatchFilterCriteria, ReviewHistory, Rule, WeighingRecord } from '../../shared/types';
 
 const router = Router();
 
@@ -142,9 +142,76 @@ router.get('/consistency', (_req: Request, res: Response) => {
       active_rules: activeRules.cnt,
       anomaly_count: (db.prepare('SELECT COUNT(*) as cnt FROM anomalies').get() as { cnt: number })?.cnt || 0,
       history_count: (db.prepare('SELECT COUNT(*) as cnt FROM review_history').get() as { cnt: number })?.cnt || 0,
-      batch_operation_count: (db.prepare('SELECT COUNT(DISTINCT batch_operation_id) as cnt FROM review_history WHERE batch_operation_id IS NOT NULL').get() as { cnt: number })?.cnt || 0,
+      batch_operation_count: (db.prepare('SELECT COUNT(*) as cnt FROM batch_operations').get() as { cnt: number })?.cnt || 0,
     },
   });
+});
+
+router.post('/filtered-detail', (req: Request, res: Response) => {
+  const filter = (req.body.filter || {}) as BatchFilterCriteria;
+  if (Object.keys(filter).length === 0) {
+    return res.status(400).json({ error: '必须指定筛选条件' });
+  }
+
+  const parts: string[] = [];
+  const params: (string | number)[] = [];
+
+  if (filter.batch_ids && filter.batch_ids.length > 0) {
+    const placeholders = filter.batch_ids.map(() => '?').join(',');
+    parts.push(`a.batch_id IN (${placeholders})`);
+    params.push(...filter.batch_ids);
+  }
+  if (filter.status) {
+    parts.push('a.status = ?');
+    params.push(filter.status);
+  }
+  if (filter.anomaly_types && filter.anomaly_types.length > 0) {
+    const placeholders = filter.anomaly_types.map(() => '?').join(',');
+    parts.push(`a.anomaly_type IN (${placeholders})`);
+    params.push(...filter.anomaly_types);
+  }
+  if (filter.time_start) {
+    parts.push('r.timestamp >= ?');
+    params.push(filter.time_start);
+  }
+  if (filter.time_end) {
+    parts.push('r.timestamp <= ?');
+    params.push(filter.time_end);
+  }
+  if (filter.created_start) {
+    parts.push('a.created_at >= ?');
+    params.push(filter.created_start);
+  }
+  if (filter.created_end) {
+    parts.push('a.created_at <= ?');
+    params.push(filter.created_end);
+  }
+  if (filter.dish_name_keyword) {
+    parts.push('r.dish_name LIKE ?');
+    params.push(`%${filter.dish_name_keyword}%`);
+  }
+
+  const whereSql = parts.length > 0 ? ' WHERE ' + parts.join(' AND ') : '';
+
+  const anomalies = db.prepare(`
+    SELECT a.*, r.dish_name, r.planned_weight, r.actual_weight, r.temperature, r.timestamp as record_time, ru.version as rule_version
+    FROM anomalies a
+    LEFT JOIN weighing_records r ON a.record_id = r.id
+    LEFT JOIN rules ru ON a.rule_version_id = ru.id
+    ${whereSql}
+    ORDER BY a.batch_id, a.created_at
+  `).all(...params) as (Anomaly & { dish_name: string; planned_weight: number; actual_weight: number; temperature: number; record_time: string; rule_version: string })[];
+
+  let csv = '批次ID,异常ID,异常类型,菜品,计划重量(g),实际重量(g),温度(℃),称重时间,规则版本,状态,人工判定,人工原因,创建时间,关闭时间\n';
+  anomalies.forEach((a) => {
+    const typeLabel = a.anomaly_type === 'over_prep' ? '备餐过量' : '变质怀疑';
+    const statusLabel = a.status === 'unresolved' ? '未结' : '已关闭';
+    const resultLabel = a.manual_result === 'confirmed' ? '确认异常' : a.manual_result === 'normal' ? '判定正常' : '';
+    csv += `${a.batch_id},${a.id},${typeLabel},${a.dish_name},${a.planned_weight},${a.actual_weight},${a.temperature ?? ''},${a.record_time},${a.rule_version},${statusLabel},${resultLabel},"${(a.manual_reason || '').replace(/"/g, '""')}",${a.created_at},${a.resolved_at || ''}\n`;
+  });
+
+  const date = new Date().toISOString().slice(0, 10);
+  sendCsv(res, csv, `复核筛选结果_${date}.csv`, `review-filtered-${date}.csv`);
 });
 
 export default router;

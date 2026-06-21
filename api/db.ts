@@ -130,6 +130,19 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_activation_logs_created ON rule_activation_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_rollback_packages_created ON rule_rollback_packages(created_at);
 
+    CREATE TABLE IF NOT EXISTS operation_logs (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      target_type TEXT NOT NULL DEFAULT 'anomaly',
+      target_id TEXT,
+      detail TEXT,
+      operator TEXT NOT NULL DEFAULT 'admin',
+      filter_snapshot TEXT,
+      timestamp TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_op_logs_timestamp ON operation_logs(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_op_logs_action ON operation_logs(action);
+
     CREATE TABLE IF NOT EXISTS batch_operations (
       id TEXT PRIMARY KEY,
       action TEXT NOT NULL,

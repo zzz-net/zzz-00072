@@ -12,6 +12,7 @@ import type {
   BatchPreviewAnomaly,
   BatchPreviewResponse,
   ManualResult,
+  OperationLog,
   ReviewHistory,
   Rule,
   SkipReasonCode,
@@ -65,6 +66,32 @@ function skipReasonToLabel(code: SkipReasonCode): string {
     batch_mismatch: '筛选条件与当前记录不匹配',
   };
   return map[code] || '未知原因';
+}
+
+function logOperation(
+  action: string,
+  targetType: string,
+  targetId: string | null,
+  detail: string | null,
+  filterSnapshot?: BatchFilterCriteria | null
+): void {
+  try {
+    const id = genId('oplog');
+    db.prepare(`
+      INSERT INTO operation_logs (id, action, target_type, target_id, detail, operator, filter_snapshot, timestamp)
+      VALUES (?, ?, ?, ?, ?, 'admin', ?, ?)
+    `).run(
+      id,
+      action,
+      targetType,
+      targetId,
+      detail,
+      filterSnapshot ? JSON.stringify(filterSnapshot) : null,
+      new Date().toISOString()
+    );
+  } catch (err) {
+    logError('Failed to write operation log', err as Error, { action, targetId });
+  }
 }
 
 function buildFilterSql(filter: BatchFilterCriteria): { sql: string; params: (string | number)[] } {
@@ -604,6 +631,7 @@ router.post('/:id/resolve', (req: Request, res: Response) => {
       batchId: anomaly.batch_id,
       typeChanged: !!typeChanged,
     });
+    logOperation('single_resolve', 'anomaly', anomalyId, `result=${result}, reason=${reason}`);
     res.json(updated);
   } catch (err) {
     logError('Resolve failed: database error', err as Error, { anomalyId });
@@ -732,13 +760,15 @@ router.post('/batch-preview', (req: Request, res: Response) => {
     };
 
     logInfo('Batch preview generated', {
-      matchedCount,
-      byBatchCount: preview.by_batch.length,
-      byTypeCount: preview.by_type.length,
-      estimatedActionable: estimatedUnresolvedActionable + estimatedResolvedActionable,
-    });
+    matchedCount,
+    byBatchCount: preview.by_batch.length,
+    byTypeCount: preview.by_type.length,
+    estimatedActionable: estimatedUnresolvedActionable + estimatedResolvedActionable,
+  });
 
-    res.json(preview);
+  logOperation('batch_preview', 'filter', null, `matched=${matchedCount}, unresolved=${estimatedUnresolvedActionable}, resolved=${estimatedResolvedActionable}`, filter);
+
+  res.json(preview);
   } catch (err) {
     logError('Batch preview failed', err as Error, { filter });
     res.status(500).json({ error: '生成预览失败，请稍后重试' });
@@ -782,6 +812,7 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
   }
 
   const response = processBatchResolve(anomaly_ids, reason, result, anomaly_type, filter);
+  logOperation('batch_resolve', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
   res.json(response);
 });
 
@@ -840,6 +871,7 @@ router.post('/batch-resolve-by-filter', (req: Request, res: Response) => {
     }
 
     const response = processBatchResolve(anomalyIds, reason, result, anomaly_type, filter);
+    logOperation('batch_resolve_by_filter', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
     res.json(response);
   } catch (err) {
     logError('Batch resolve by filter failed', err as Error, { filter });
@@ -885,6 +917,7 @@ router.post('/:id/reopen', (req: Request, res: Response) => {
 
     const updated = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(anomalyId) as Anomaly;
     logInfo('Anomaly reopened successfully', { anomalyId, batchId: anomaly.batch_id });
+    logOperation('single_reopen', 'anomaly', anomalyId, `reason=${reason || '撤销关闭'}`);
     res.json(updated);
   } catch (err) {
     logError('Reopen failed: database error', err as Error, { anomalyId });
@@ -916,6 +949,7 @@ router.post('/batch-reopen', (req: Request, res: Response) => {
 
   const appliedReason = reason || '批量撤销关闭';
   const response = processBatchReopen(anomaly_ids, appliedReason, filter);
+  logOperation('batch_reopen', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
   res.json(response);
 });
 
@@ -963,6 +997,7 @@ router.post('/batch-reopen-by-filter', (req: Request, res: Response) => {
 
     const appliedReason = reason || '批量撤销关闭';
     const response = processBatchReopen(anomalyIds, appliedReason, filter);
+    logOperation('batch_reopen_by_filter', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
     res.json(response);
   } catch (err) {
     logError('Batch reopen by filter failed', err as Error, { filter });
@@ -1007,6 +1042,20 @@ router.get('/batch-operations/list', (_req: Request, res: Response) => {
   } catch (err) {
     logError('Fetch batch operations list failed', err as Error);
     res.status(500).json({ error: '查询批量操作列表失败' });
+  }
+});
+
+router.get('/operation-logs/list', (req: Request, res: Response) => {
+  const limit = Math.min(parseInt(req.query.limit as string) || 50, 200);
+  logInfo('Fetch operation logs', { limit });
+  try {
+    const list = db
+      .prepare('SELECT * FROM operation_logs ORDER BY timestamp DESC LIMIT ?')
+      .all(limit) as OperationLog[];
+    res.json(list);
+  } catch (err) {
+    logError('Fetch operation logs failed', err as Error);
+    res.status(500).json({ error: '查询操作日志失败' });
   }
 });
 

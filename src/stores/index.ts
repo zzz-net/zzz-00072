@@ -10,6 +10,7 @@ import type {
   BatchOperationResponse,
   BatchPreviewResponse,
   ManualResult,
+  OperationLog,
   ReviewHistory,
   Rule,
   RulePreviewDetail,
@@ -62,6 +63,7 @@ interface AppState {
   batchPreview: BatchPreviewResponse | null;
   batchOperations: BatchOperationRecord[];
   batchOperationDetail: { operation: BatchOperationRecord | null; history: ReviewHistory[] } | null;
+  operationLogs: OperationLog[];
   consistency: { ok: boolean; issues: string[]; stats: unknown } | null;
   lastValidation: ValidationResult | null;
   rulePreviews: RulePreviewDetail[];
@@ -90,6 +92,8 @@ interface AppState {
   fetchBatchOperations: () => Promise<void>;
   fetchBatchOperationDetail: (batchOperationId: string) => Promise<void>;
   setBatchOperationResult: (r: BatchOperationResponse | null) => void;
+  fetchOperationLogs: (limit?: number) => Promise<void>;
+  exportFilteredDetail: (filter: BatchFilterCriteria) => Promise<void>;
   createRule: (r: Omit<Rule, 'id' | 'created_at' | 'is_active'>) => Promise<{ error?: string; issues?: ValidationIssue[] }>;
   activateRule: (id: string) => Promise<void>;
   checkConsistency: () => Promise<void>;
@@ -128,6 +132,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   batchPreview: null,
   batchOperations: [],
   batchOperationDetail: null,
+  operationLogs: [],
   consistency: null,
   lastValidation: null,
   rulePreviews: [],
@@ -436,6 +441,47 @@ export const useAppStore = create<AppState>((set, get) => ({
   },
 
   setBatchOperationResult: (r) => set({ batchOperationResult: r }),
+
+  fetchOperationLogs: async (limit = 50) => {
+    const r = await api(`/anomalies/operation-logs/list?limit=${limit}`);
+    if (r.ok) {
+      const data = await r.json();
+      set({ operationLogs: data as OperationLog[] });
+    }
+  },
+
+  exportFilteredDetail: async (filter) => {
+    try {
+      const r = await fetch('/api/export/filtered-detail', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filter }),
+      });
+      if (!r.ok) {
+        const data = await r.json().catch(() => ({}));
+        get().setToast({ msg: (data as { error?: string }).error || '导出失败', type: 'error' });
+        return;
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = r.headers.get('Content-Disposition');
+      let filename = `review-filtered-${new Date().toISOString().slice(0, 10)}.csv`;
+      if (cd) {
+        const match = cd.match(/filename\*?=(?:UTF-8'')?["']?([^;"'\n]+)/i);
+        if (match) filename = decodeURIComponent(match[1]);
+      }
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      get().setToast({ msg: '筛选结果已导出为 CSV', type: 'success' });
+    } catch {
+      get().setToast({ msg: '导出失败', type: 'error' });
+    }
+  },
 
   createRule: async (r) => {
     const resp = await api('/rules', { method: 'POST', body: JSON.stringify(r) });

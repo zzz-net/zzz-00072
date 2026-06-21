@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo } from 'react';
+import { useEffect, useState, useMemo, useCallback } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -24,6 +24,8 @@ import {
   Eye,
   ListChecks,
   Layers,
+  Download,
+  Activity,
 } from 'lucide-react';
 import { useAppStore } from '@/stores';
 import type {
@@ -34,8 +36,28 @@ import type {
   BatchFilterCriteria,
 } from '@shared/types';
 
+const STORAGE_KEY = 'review_filter_state';
+
+function loadSavedFilters(batchId: string | undefined) {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const saved = JSON.parse(raw);
+    if (saved.batchId === batchId) return saved;
+  } catch {}
+  return null;
+}
+
+function saveFilters(batchId: string | undefined, filters: Record<string, unknown>) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify({ batchId, ...filters, savedAt: Date.now() }));
+  } catch {}
+}
+
 export default function ReviewList() {
   const { id } = useParams<{ id: string }>();
+  const saved = loadSavedFilters(id);
+
   const {
     batches,
     anomalies,
@@ -43,6 +65,8 @@ export default function ReviewList() {
     selectedAnomalyIds,
     batchOperationResult,
     batchPreview,
+    batchOperations,
+    operationLogs,
     fetchAnomalies,
     fetchAnomalyDetail,
     resolveAnomaly,
@@ -60,10 +84,12 @@ export default function ReviewList() {
     clearBatchPreview,
     setBatchOperationResult,
     fetchBatchOperations,
+    fetchOperationLogs,
+    exportFilteredDetail,
   } = useAppStore();
 
-  const [statusFilter, setStatusFilter] = useState<AnomalyStatus | 'all'>('all');
-  const [typeFilter, setTypeFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<AnomalyStatus | 'all'>(saved?.statusFilter ?? 'all');
+  const [typeFilter, setTypeFilter] = useState<string>(saved?.typeFilter ?? 'all');
   const [resolveReason, setResolveReason] = useState('');
   const [resolveResult, setResolveResult] = useState<ManualResult>(null);
   const [reopenReason, setReopenReason] = useState('');
@@ -75,20 +101,21 @@ export default function ReviewList() {
   const [batchReopenReason, setBatchReopenReason] = useState('');
   const [showBatchResult, setShowBatchResult] = useState(false);
   const [showPreviewModal, setShowPreviewModal] = useState(false);
-  const [showAdvancedFilter, setShowAdvancedFilter] = useState(false);
+  const [showAdvancedFilter, setShowAdvancedFilter] = useState(saved?.showAdvancedFilter ?? false);
   const [previewLoading, setPreviewLoading] = useState(false);
-  const [sourceBatchFilter, setSourceBatchFilter] = useState<string>('current');
+  const [sourceBatchFilter, setSourceBatchFilter] = useState<string>(saved?.sourceBatchFilter ?? 'current');
   const [filterBatchResult, setFilterBatchResult] = useState<ManualResult>(null);
   const [filterBatchReason, setFilterBatchReason] = useState('');
   const [showFilterBatchModal, setShowFilterBatchModal] = useState(false);
   const [filterBatchAction, setFilterBatchAction] = useState<'resolve' | 'reopen'>('resolve');
   const [filterBatchSubmitting, setFilterBatchSubmitting] = useState(false);
+  const [showOpsPanel, setShowOpsPanel] = useState(false);
 
-  const [recordTimeStart, setRecordTimeStart] = useState('');
-  const [recordTimeEnd, setRecordTimeEnd] = useState('');
-  const [createdTimeStart, setCreatedTimeStart] = useState('');
-  const [createdTimeEnd, setCreatedTimeEnd] = useState('');
-  const [dishKeyword, setDishKeyword] = useState('');
+  const [recordTimeStart, setRecordTimeStart] = useState(saved?.recordTimeStart ?? '');
+  const [recordTimeEnd, setRecordTimeEnd] = useState(saved?.recordTimeEnd ?? '');
+  const [createdTimeStart, setCreatedTimeStart] = useState(saved?.createdTimeStart ?? '');
+  const [createdTimeEnd, setCreatedTimeEnd] = useState(saved?.createdTimeEnd ?? '');
+  const [dishKeyword, setDishKeyword] = useState(saved?.dishKeyword ?? '');
 
   const batch = batches.find((b) => b.id === id);
 
@@ -147,6 +174,7 @@ export default function ReviewList() {
       anomalyDetail ? fetchAnomalyDetail(anomalyDetail.id) : Promise.resolve(),
       fetchBatches(),
       fetchBatchOperations(),
+      fetchOperationLogs(20),
     ]);
   };
 
@@ -236,7 +264,22 @@ export default function ReviewList() {
   useEffect(() => {
     fetchBatches();
     fetchBatchOperations();
-  }, [fetchBatches, fetchBatchOperations]);
+    fetchOperationLogs(20);
+  }, [fetchBatches, fetchBatchOperations, fetchOperationLogs]);
+
+  useEffect(() => {
+    saveFilters(id, {
+      statusFilter,
+      typeFilter,
+      sourceBatchFilter,
+      showAdvancedFilter,
+      recordTimeStart,
+      recordTimeEnd,
+      createdTimeStart,
+      createdTimeEnd,
+      dishKeyword,
+    });
+  }, [id, statusFilter, typeFilter, sourceBatchFilter, showAdvancedFilter, recordTimeStart, recordTimeEnd, createdTimeStart, createdTimeEnd, dishKeyword]);
 
   useEffect(() => {
     const fetchBatchId = sourceBatchFilter === 'current' ? id : sourceBatchFilter === 'all' ? undefined : sourceBatchFilter;
@@ -265,13 +308,17 @@ export default function ReviewList() {
 
   const handleResolve = async () => {
     if (!anomalyDetail || !resolveReason || !resolveResult) return;
+    const targetId = anomalyDetail.id;
     const r = await resolveAnomaly(
-      anomalyDetail.id,
+      targetId,
       resolveReason,
       resolveResult,
       overrideType ? overrideType : undefined
     );
     if (!r.error) {
+      if (selectedAnomalyIds.has(targetId)) {
+        toggleAnomalySelection(targetId);
+      }
       await refreshAllAfterBatch();
     }
     setResolveReason('');
@@ -281,8 +328,12 @@ export default function ReviewList() {
 
   const handleReopen = async () => {
     if (!anomalyDetail) return;
-    const r = await reopenAnomaly(anomalyDetail.id, reopenReason || undefined);
+    const targetId = anomalyDetail.id;
+    const r = await reopenAnomaly(targetId, reopenReason || undefined);
     if (!r.error) {
+      if (selectedAnomalyIds.has(targetId)) {
+        toggleAnomalySelection(targetId);
+      }
       await refreshAllAfterBatch();
     }
     setReopenReason('');
@@ -316,6 +367,32 @@ export default function ReviewList() {
     : (batches.find((b) => b.id === sourceBatchFilter)?.name || '异常复核');
   const totalAnomalyCount = anomalies.length;
   const totalUnresolvedCount = anomalies.filter((a) => a.status === 'unresolved').length;
+
+  const handleExportFiltered = () => {
+    const filter = buildFilter();
+    exportFilteredDetail(filter);
+  };
+
+  const opLogActionLabel = (action: string) => {
+    const map: Record<string, string> = {
+      single_resolve: '单条关闭',
+      single_reopen: '单条撤销',
+      batch_resolve: '批量关闭',
+      batch_reopen: '批量撤销',
+      batch_resolve_by_filter: '按筛选批量关闭',
+      batch_reopen_by_filter: '按筛选批量撤销',
+      batch_preview: '批量预览',
+    };
+    return map[action] || action;
+  };
+
+  const recentOps = useMemo(() => {
+    return operationLogs.slice(0, 15);
+  }, [operationLogs]);
+
+  const recentBatchOps = useMemo(() => {
+    return batchOperations.slice(0, 10);
+  }, [batchOperations]);
 
   return (
     <div className="space-y-4">
@@ -418,6 +495,27 @@ export default function ReviewList() {
             <Eye className="w-3.5 h-3.5" />
             {previewLoading ? '加载中...' : '预览筛选结果'}
           </button>
+          <button
+            onClick={handleExportFiltered}
+            className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-100 text-slate-700 rounded text-xs hover:bg-slate-200"
+          >
+            <Download className="w-3.5 h-3.5" />
+            导出筛选结果
+          </button>
+          <button
+            onClick={() => setShowOpsPanel(!showOpsPanel)}
+            className={`inline-flex items-center gap-1 px-3 py-1.5 rounded text-xs transition-colors ${
+              showOpsPanel
+                ? 'bg-primary-50 text-primary-700 border border-primary-200 font-medium'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            <Activity className="w-3.5 h-3.5" />
+            操作日志
+            {operationLogs.length > 0 && (
+              <span className="w-1.5 h-1.5 rounded-full bg-primary-500 ml-0.5" />
+            )}
+          </button>
         </div>
 
         {showAdvancedFilter && (
@@ -483,6 +581,83 @@ export default function ReviewList() {
           </div>
         )}
       </div>
+
+      {showOpsPanel && (
+        <div className="bg-white border border-slate-200 rounded-lg overflow-hidden">
+          <div className="px-4 py-2.5 border-b border-slate-200 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <Activity className="w-4 h-4 text-primary-600" />
+              <span className="text-sm font-medium text-slate-700">最近操作记录</span>
+              <span className="text-xs text-slate-400">（方便交接）</span>
+            </div>
+            <button
+              onClick={() => setShowOpsPanel(false)}
+              className="text-slate-400 hover:text-slate-600"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+          <div className="max-h-60 overflow-auto scrollbar-thin">
+            {recentOps.length === 0 && recentBatchOps.length === 0 ? (
+              <div className="p-6 text-center text-sm text-slate-400">暂无操作记录</div>
+            ) : (
+              <div className="divide-y divide-slate-100">
+                {recentBatchOps.map((op) => (
+                  <div key={op.id} className="px-4 py-2.5 flex items-start gap-3">
+                    <div className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${
+                      op.action === 'resolve' ? 'bg-emerald-500' : 'bg-amber-500'
+                    }`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-medium text-slate-700">
+                          {op.action === 'resolve' ? '批量关闭' : '批量撤销'}
+                        </span>
+                        {op.applied_result && (
+                          <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                            op.applied_result === 'normal' ? 'bg-emerald-100 text-emerald-700' : 'bg-red-100 text-red-700'
+                          }`}>
+                            {op.applied_result === 'normal' ? '误报' : '确认异常'}
+                          </span>
+                        )}
+                        <span className="text-slate-400">
+                          成功 {op.success_count}{op.skipped_count > 0 ? ` / 跳过 ${op.skipped_count}` : ''}
+                        </span>
+                      </div>
+                      <div className="text-xs text-slate-500 mt-0.5 truncate">
+                        {op.applied_reason}
+                      </div>
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        {new Date(op.timestamp).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+                {recentOps.filter(op => !op.action.startsWith('batch_resolve') && !op.action.startsWith('batch_reopen')).map((op) => (
+                  <div key={op.id} className="px-4 py-2.5 flex items-start gap-3">
+                    <div className={`w-2 h-2 rounded-full mt-1.5 flex-shrink-0 ${
+                      op.action.includes('resolve') ? 'bg-emerald-500' : op.action.includes('reopen') ? 'bg-amber-500' : 'bg-blue-500'
+                    }`} />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2 text-xs">
+                        <span className="font-medium text-slate-700">{opLogActionLabel(op.action)}</span>
+                        {op.target_id && (
+                          <span className="font-mono text-[10px] text-slate-400">{op.target_id.slice(-8)}</span>
+                        )}
+                      </div>
+                      {op.detail && (
+                        <div className="text-xs text-slate-500 mt-0.5 truncate">{op.detail}</div>
+                      )}
+                      <div className="text-[10px] text-slate-400 mt-0.5">
+                        {new Date(op.timestamp).toLocaleString()}
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {selectedAnomalyIds.size > 0 && (
         <div className="bg-primary-50 border border-primary-200 rounded-lg p-3 flex items-center justify-between gap-3 flex-wrap">
