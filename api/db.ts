@@ -129,6 +129,23 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_previews_status ON rule_previews(status);
     CREATE INDEX IF NOT EXISTS idx_activation_logs_created ON rule_activation_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_rollback_packages_created ON rule_rollback_packages(created_at);
+
+    CREATE TABLE IF NOT EXISTS batch_operations (
+      id TEXT PRIMARY KEY,
+      action TEXT NOT NULL,
+      applied_result TEXT,
+      applied_reason TEXT NOT NULL,
+      applied_anomaly_type TEXT,
+      filter_snapshot TEXT,
+      total_submitted INTEGER NOT NULL DEFAULT 0,
+      success_count INTEGER NOT NULL DEFAULT 0,
+      skipped_count INTEGER NOT NULL DEFAULT 0,
+      failed_count INTEGER NOT NULL DEFAULT 0,
+      operator TEXT NOT NULL DEFAULT 'admin',
+      timestamp TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS idx_batch_ops_timestamp ON batch_operations(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_batch_ops_action ON batch_operations(action);
   `);
 
   const columns = db.prepare('PRAGMA table_info(review_history)').all() as { name: string }[];

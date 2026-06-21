@@ -16,9 +16,23 @@ import {
   XCircle,
   Info,
   X,
+  Search,
+  ChevronDown,
+  ChevronUp,
+  CalendarDays,
+  SlidersHorizontal,
+  Eye,
+  ListChecks,
+  Layers,
 } from 'lucide-react';
 import { useAppStore } from '@/stores';
-import type { Anomaly, AnomalyStatus, ManualResult, AnomalyType } from '@shared/types';
+import type {
+  Anomaly,
+  AnomalyStatus,
+  ManualResult,
+  AnomalyType,
+  BatchFilterCriteria,
+} from '@shared/types';
 
 export default function ReviewList() {
   const { id } = useParams<{ id: string }>();
@@ -28,6 +42,7 @@ export default function ReviewList() {
     anomalyDetail,
     selectedAnomalyIds,
     batchOperationResult,
+    batchPreview,
     fetchAnomalies,
     fetchAnomalyDetail,
     resolveAnomaly,
@@ -39,7 +54,10 @@ export default function ReviewList() {
     clearAnomalySelection,
     batchResolveAnomalies,
     batchReopenAnomalies,
+    batchPreviewAnomalies,
+    clearBatchPreview,
     setBatchOperationResult,
+    fetchBatchOperations,
   } = useAppStore();
 
   const [statusFilter, setStatusFilter] = useState<AnomalyStatus | 'all'>('all');
@@ -54,6 +72,15 @@ export default function ReviewList() {
   const [batchReason, setBatchReason] = useState('');
   const [batchReopenReason, setBatchReopenReason] = useState('');
   const [showBatchResult, setShowBatchResult] = useState(false);
+  const [showPreviewModal, setShowPreviewModal] = useState(false);
+  const [showAdvancedFilter, setShowAdvancedFilter] = useState(false);
+  const [previewLoading, setPreviewLoading] = useState(false);
+
+  const [recordTimeStart, setRecordTimeStart] = useState('');
+  const [recordTimeEnd, setRecordTimeEnd] = useState('');
+  const [createdTimeStart, setCreatedTimeStart] = useState('');
+  const [createdTimeEnd, setCreatedTimeEnd] = useState('');
+  const [dishKeyword, setDishKeyword] = useState('');
 
   const batch = batches.find((b) => b.id === id);
 
@@ -69,6 +96,19 @@ export default function ReviewList() {
     ).length;
   }, [anomalies, selectedAnomalyIds]);
 
+  const buildFilter = (): BatchFilterCriteria => {
+    const f: BatchFilterCriteria = {};
+    if (id) f.batch_ids = [id];
+    if (statusFilter !== 'all') f.status = statusFilter;
+    if (typeFilter !== 'all') f.anomaly_types = [typeFilter as AnomalyType];
+    if (recordTimeStart) f.time_start = recordTimeStart;
+    if (recordTimeEnd) f.time_end = recordTimeEnd + 'T23:59:59';
+    if (createdTimeStart) f.created_start = createdTimeStart;
+    if (createdTimeEnd) f.created_end = createdTimeEnd + 'T23:59:59';
+    if (dishKeyword.trim()) f.dish_name_keyword = dishKeyword.trim();
+    return f;
+  };
+
   const handleSelectAll = () => {
     selectAllAnomalies(statusFilter === 'all' ? undefined : statusFilter);
   };
@@ -79,6 +119,24 @@ export default function ReviewList() {
     setShowBatchModal(true);
   };
 
+  const openBatchReopenModal = () => {
+    setBatchReopenReason('');
+    setShowBatchReopenModal(true);
+  };
+
+  const refreshAllAfterBatch = async () => {
+    await Promise.all([
+      fetchAnomalies(
+        id,
+        statusFilter === 'all' ? undefined : statusFilter,
+        typeFilter === 'all' ? undefined : typeFilter
+      ),
+      anomalyDetail ? fetchAnomalyDetail(anomalyDetail.id) : Promise.resolve(),
+      fetchBatches(),
+      fetchBatchOperations(),
+    ]);
+  };
+
   const handleBatchResolve = async () => {
     if (!batchResolveResult || !batchReason) return;
     const ids = Array.from(selectedAnomalyIds).filter((aid) =>
@@ -86,24 +144,13 @@ export default function ReviewList() {
     );
     if (ids.length === 0) return;
 
-    const r = await batchResolveAnomalies(ids, batchReason, batchResolveResult);
+    const filter = buildFilter();
+    const r = await batchResolveAnomalies(ids, batchReason, batchResolveResult, undefined, filter);
     if (r.result) {
       setShowBatchModal(false);
       setShowBatchResult(true);
-      await Promise.all([
-        fetchAnomalies(
-          id,
-          statusFilter === 'all' ? undefined : statusFilter,
-          typeFilter === 'all' ? undefined : typeFilter
-        ),
-        anomalyDetail ? fetchAnomalyDetail(anomalyDetail.id) : Promise.resolve(),
-      ]);
+      await refreshAllAfterBatch();
     }
-  };
-
-  const openBatchReopenModal = () => {
-    setBatchReopenReason('');
-    setShowBatchReopenModal(true);
   };
 
   const handleBatchReopen = async () => {
@@ -113,24 +160,37 @@ export default function ReviewList() {
     if (ids.length === 0) return;
 
     const reason = batchReopenReason || undefined;
-    const r = await batchReopenAnomalies(ids, reason);
+    const filter = buildFilter();
+    const r = await batchReopenAnomalies(ids, reason, filter);
     if (r.result) {
       setShowBatchReopenModal(false);
       setShowBatchResult(true);
-      await Promise.all([
-        fetchAnomalies(
-          id,
-          statusFilter === 'all' ? undefined : statusFilter,
-          typeFilter === 'all' ? undefined : typeFilter
-        ),
-        anomalyDetail ? fetchAnomalyDetail(anomalyDetail.id) : Promise.resolve(),
-      ]);
+      await refreshAllAfterBatch();
     }
+  };
+
+  const handlePreviewSelection = async () => {
+    if (selectedAnomalyIds.size === 0) return;
+    setPreviewLoading(true);
+    const filter = buildFilter();
+    const ids = Array.from(selectedAnomalyIds);
+    await batchPreviewAnomalies(filter, ids);
+    setPreviewLoading(false);
+    setShowPreviewModal(true);
+  };
+
+  const handlePreviewFilter = async () => {
+    setPreviewLoading(true);
+    const filter = buildFilter();
+    await batchPreviewAnomalies(filter);
+    setPreviewLoading(false);
+    setShowPreviewModal(true);
   };
 
   useEffect(() => {
     fetchBatches();
-  }, [fetchBatches]);
+    fetchBatchOperations();
+  }, [fetchBatches, fetchBatchOperations]);
 
   useEffect(() => {
     if (id) {
@@ -165,14 +225,7 @@ export default function ReviewList() {
       overrideType ? overrideType : undefined
     );
     if (!r.error) {
-      await Promise.all([
-        fetchAnomalies(
-          id,
-          statusFilter === 'all' ? undefined : statusFilter,
-          typeFilter === 'all' ? undefined : typeFilter
-        ),
-        fetchAnomalyDetail(anomalyDetail.id),
-      ]);
+      await refreshAllAfterBatch();
     }
     setResolveReason('');
     setResolveResult(null);
@@ -183,14 +236,7 @@ export default function ReviewList() {
     if (!anomalyDetail) return;
     const r = await reopenAnomaly(anomalyDetail.id, reopenReason || undefined);
     if (!r.error) {
-      await Promise.all([
-        fetchAnomalies(
-          id,
-          statusFilter === 'all' ? undefined : statusFilter,
-          typeFilter === 'all' ? undefined : typeFilter
-        ),
-        fetchAnomalyDetail(anomalyDetail.id),
-      ]);
+      await refreshAllAfterBatch();
     }
     setReopenReason('');
   };
@@ -201,7 +247,21 @@ export default function ReviewList() {
     return { label: '变质怀疑', color: 'bg-amber-100 text-amber-700', icon: Thermometer };
   };
 
+  const skipReasonBadge = (code?: string) => {
+    const map: Record<string, { color: string; label: string }> = {
+      not_found: { color: 'bg-slate-100 text-slate-600', label: '记录不存在' },
+      already_resolved: { color: 'bg-emerald-100 text-emerald-700', label: '已关闭' },
+      already_unresolved: { color: 'bg-amber-100 text-amber-700', label: '已未结' },
+      status_changed_by_other: { color: 'bg-orange-100 text-orange-700', label: '状态变更' },
+      reopened_after_batch: { color: 'bg-blue-100 text-blue-700', label: '已撤销' },
+      modified_individually: { color: 'bg-purple-100 text-purple-700', label: '单条处理' },
+      batch_mismatch: { color: 'bg-pink-100 text-pink-700', label: '筛选不符' },
+    };
+    return map[code || ''] || { color: 'bg-slate-100 text-slate-600', label: '未知' };
+  };
+
   const currentDetail = anomalyDetail;
+  const hasAdvancedFilters = !!recordTimeStart || !!recordTimeEnd || !!createdTimeStart || !!createdTimeEnd || !!dishKeyword.trim();
 
   return (
     <div className="space-y-4">
@@ -224,43 +284,143 @@ export default function ReviewList() {
         </div>
       </div>
 
-      <div className="bg-white border border-slate-200 rounded-lg p-3 flex items-center gap-3">
-        <Filter className="w-4 h-4 text-slate-500" />
-        <div className="flex items-center gap-1 bg-slate-100 rounded p-0.5">
-          {(['all', 'unresolved', 'resolved'] as const).map((s) => (
-            <button
-              key={s}
-              onClick={() => setStatusFilter(s)}
-              className={`px-3 py-1 rounded text-xs transition-colors ${
-                statusFilter === s
-                  ? 'bg-white text-primary-700 shadow-sm font-medium'
-                  : 'text-slate-600'
-              }`}
-            >
-              {s === 'all' ? '全部' : s === 'unresolved' ? '未结' : '已关闭'}
-            </button>
-          ))}
+      <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-3">
+        <div className="flex items-center gap-3 flex-wrap">
+          <Filter className="w-4 h-4 text-slate-500" />
+          <div className="flex items-center gap-1 bg-slate-100 rounded p-0.5">
+            {(['all', 'unresolved', 'resolved'] as const).map((s) => (
+              <button
+                key={s}
+                onClick={() => setStatusFilter(s)}
+                className={`px-3 py-1 rounded text-xs transition-colors ${
+                  statusFilter === s
+                    ? 'bg-white text-primary-700 shadow-sm font-medium'
+                    : 'text-slate-600'
+                }`}
+              >
+                {s === 'all' ? '全部' : s === 'unresolved' ? '未结' : '已关闭'}
+              </button>
+            ))}
+          </div>
+          <div className="h-5 w-px bg-slate-200" />
+          <div className="flex items-center gap-1 bg-slate-100 rounded p-0.5">
+            {(['all', 'over_prep', 'spoilage_suspect'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTypeFilter(t)}
+                className={`px-3 py-1 rounded text-xs transition-colors ${
+                  typeFilter === t
+                    ? 'bg-white text-primary-700 shadow-sm font-medium'
+                    : 'text-slate-600'
+                }`}
+              >
+                {t === 'all' ? '全部类型' : t === 'over_prep' ? '备餐过量' : '变质怀疑'}
+              </button>
+            ))}
+          </div>
+          <div className="flex-1 min-w-[200px]">
+            <div className="relative">
+              <Search className="w-4 h-4 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
+              <input
+                type="text"
+                value={dishKeyword}
+                onChange={(e) => setDishKeyword(e.target.value)}
+                placeholder="搜索菜品名称..."
+                className="w-full pl-8 pr-3 py-1.5 text-xs border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent"
+              />
+            </div>
+          </div>
+          <button
+            onClick={() => setShowAdvancedFilter(!showAdvancedFilter)}
+            className={`inline-flex items-center gap-1 px-3 py-1.5 rounded text-xs transition-colors ${
+              showAdvancedFilter || hasAdvancedFilters
+                ? 'bg-primary-50 text-primary-700 border border-primary-200 font-medium'
+                : 'bg-slate-100 text-slate-600 hover:bg-slate-200'
+            }`}
+          >
+            <SlidersHorizontal className="w-3.5 h-3.5" />
+            高级筛选
+            {hasAdvancedFilters && (
+              <span className="w-1.5 h-1.5 rounded-full bg-primary-500 ml-0.5" />
+            )}
+            {showAdvancedFilter ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
+          </button>
+          <button
+            onClick={handlePreviewFilter}
+            disabled={previewLoading}
+            className="inline-flex items-center gap-1 px-3 py-1.5 bg-slate-100 text-slate-700 rounded text-xs hover:bg-slate-200 disabled:opacity-50"
+          >
+            <Eye className="w-3.5 h-3.5" />
+            {previewLoading ? '加载中...' : '预览筛选结果'}
+          </button>
         </div>
-        <div className="h-5 w-px bg-slate-200" />
-        <div className="flex items-center gap-1 bg-slate-100 rounded p-0.5">
-          {(['all', 'over_prep', 'spoilage_suspect'] as const).map((t) => (
-            <button
-              key={t}
-              onClick={() => setTypeFilter(t)}
-              className={`px-3 py-1 rounded text-xs transition-colors ${
-                typeFilter === t
-                  ? 'bg-white text-primary-700 shadow-sm font-medium'
-                  : 'text-slate-600'
-              }`}
-            >
-              {t === 'all' ? '全部类型' : t === 'over_prep' ? '备餐过量' : '变质怀疑'}
-            </button>
-          ))}
-        </div>
+
+        {showAdvancedFilter && (
+          <div className="pt-3 border-t border-slate-100 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-slate-500 flex items-center gap-1">
+                <CalendarDays className="w-3 h-3" />
+                称重时间范围
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={recordTimeStart}
+                  onChange={(e) => setRecordTimeStart(e.target.value)}
+                  className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+                <span className="text-xs text-slate-400">至</span>
+                <input
+                  type="date"
+                  value={recordTimeEnd}
+                  onChange={(e) => setRecordTimeEnd(e.target.value)}
+                  className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+            </div>
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-slate-500 flex items-center gap-1">
+                <Clock className="w-3 h-3" />
+                异常创建时间范围
+              </div>
+              <div className="flex items-center gap-2">
+                <input
+                  type="date"
+                  value={createdTimeStart}
+                  onChange={(e) => setCreatedTimeStart(e.target.value)}
+                  className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+                <span className="text-xs text-slate-400">至</span>
+                <input
+                  type="date"
+                  value={createdTimeEnd}
+                  onChange={(e) => setCreatedTimeEnd(e.target.value)}
+                  className="flex-1 px-3 py-1.5 text-xs border border-slate-200 rounded focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+            </div>
+            {(recordTimeStart || recordTimeEnd || createdTimeStart || createdTimeEnd || dishKeyword.trim()) && (
+              <div className="md:col-span-2 flex justify-end">
+                <button
+                  onClick={() => {
+                    setRecordTimeStart('');
+                    setRecordTimeEnd('');
+                    setCreatedTimeStart('');
+                    setCreatedTimeEnd('');
+                    setDishKeyword('');
+                  }}
+                  className="text-xs text-slate-500 hover:text-slate-700 px-3 py-1 hover:bg-slate-100 rounded"
+                >
+                  清空高级筛选条件
+                </button>
+              </div>
+            )}
+          </div>
+        )}
       </div>
 
       {selectedAnomalyIds.size > 0 && (
-        <div className="bg-primary-50 border border-primary-200 rounded-lg p-3 flex items-center justify-between gap-3">
+        <div className="bg-primary-50 border border-primary-200 rounded-lg p-3 flex items-center justify-between gap-3 flex-wrap">
           <div className="flex items-center gap-2 flex-wrap">
             <CheckSquare className="w-4 h-4 text-primary-600" />
             <span className="text-sm text-slate-700">
@@ -278,6 +438,14 @@ export default function ReviewList() {
             </span>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            <button
+              onClick={handlePreviewSelection}
+              disabled={previewLoading}
+              className="px-3 py-1.5 bg-white border border-primary-200 text-primary-700 rounded text-xs hover:bg-primary-50 inline-flex items-center gap-1 disabled:opacity-50"
+            >
+              <Eye className="w-3.5 h-3.5" />
+              预览选中项
+            </button>
             {selectedUnresolvedCount > 0 && (
               <>
                 <button
@@ -321,6 +489,11 @@ export default function ReviewList() {
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-primary-600" />
               异常列表
+              {anomalies.length > 0 && (
+                <span className="text-xs font-normal text-slate-400">
+                  共 {anomalies.length} 条
+                </span>
+              )}
             </div>
             <button
               onClick={handleSelectAll}
@@ -396,7 +569,7 @@ export default function ReviewList() {
                         {tb.label}
                       </span>
                     </div>
-                    <div className="mt-1.5 flex items-center gap-3 text-xs text-slate-500">
+                    <div className="mt-1.5 flex items-center gap-3 text-xs text-slate-500 flex-wrap">
                       <span
                         className={`inline-flex items-center gap-1 ${
                           a.status === 'unresolved' ? 'text-amber-600' : 'text-emerald-600'
@@ -738,6 +911,161 @@ export default function ReviewList() {
         </div>
       </div>
 
+      {showPreviewModal && batchPreview && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-3xl w-full max-h-[85vh] overflow-hidden flex flex-col">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                <Eye className="w-5 h-5 text-primary-600" />
+                批量处理预览
+              </h3>
+              <button
+                onClick={() => {
+                  setShowPreviewModal(false);
+                  clearBatchPreview();
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-5 space-y-4">
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="bg-slate-50 rounded p-3">
+                  <div className="text-2xl font-bold text-slate-700">
+                    {batchPreview.matched_count}
+                  </div>
+                  <div className="text-xs text-slate-500 mt-1">匹配总数</div>
+                </div>
+                <div className="bg-amber-50 rounded p-3">
+                  <div className="text-2xl font-bold text-amber-600">
+                    {batchPreview.estimated_unresolved_actionable}
+                  </div>
+                  <div className="text-xs text-amber-700 mt-1">未结可处理</div>
+                </div>
+                <div className="bg-emerald-50 rounded p-3">
+                  <div className="text-2xl font-bold text-emerald-600">
+                    {batchPreview.estimated_resolved_actionable}
+                  </div>
+                  <div className="text-xs text-emerald-700 mt-1">已关可撤销</div>
+                </div>
+              </div>
+
+              {batchPreview.by_batch.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1">
+                    <Layers className="w-3.5 h-3.5" />
+                    按批次分布
+                  </h4>
+                  <div className="space-y-1">
+                    {batchPreview.by_batch.map((b) => (
+                      <div key={b.batch_id} className="flex items-center justify-between bg-slate-50 rounded px-3 py-2 text-xs">
+                        <span className="text-slate-700 font-medium">{b.batch_name}</span>
+                        <span className="flex items-center gap-3">
+                          <span className="text-slate-500">共 {b.count}</span>
+                          <span className="text-amber-600">未结 {b.unresolved_count}</span>
+                          <span className="text-emerald-600">已关 {b.resolved_count}</span>
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="grid grid-cols-2 gap-3">
+                {batchPreview.by_type.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1">
+                      <ListChecks className="w-3.5 h-3.5" />
+                      按异常类型
+                    </h4>
+                    <div className="space-y-1">
+                      {batchPreview.by_type.map((t) => (
+                        <div key={t.type} className="flex items-center justify-between bg-slate-50 rounded px-3 py-2 text-xs">
+                          <span className="text-slate-700">{t.label}</span>
+                          <span className="text-slate-500 font-medium">{t.count}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {batchPreview.by_status.length > 0 && (
+                  <div>
+                    <h4 className="text-xs font-semibold text-slate-500 mb-2 flex items-center gap-1">
+                      <Clock className="w-3.5 h-3.5" />
+                      按处理状态
+                    </h4>
+                    <div className="space-y-1">
+                      {batchPreview.by_status.map((s) => (
+                        <div key={s.status} className="flex items-center justify-between bg-slate-50 rounded px-3 py-2 text-xs">
+                          <span className="text-slate-700">{s.label}</span>
+                          <span className={`font-medium ${s.status === 'unresolved' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                            {s.count}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {batchPreview.samples.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-slate-500 mb-2">
+                    样例记录（最多展示 20 条）
+                  </h4>
+                  <div className="border border-slate-200 rounded overflow-hidden">
+                    <table className="w-full text-xs">
+                      <thead className="bg-slate-50 text-slate-600">
+                        <tr>
+                          <th className="px-3 py-2 text-left font-medium">菜品</th>
+                          <th className="px-3 py-2 text-left font-medium">类型</th>
+                          <th className="px-3 py-2 text-left font-medium">状态</th>
+                          <th className="px-3 py-2 text-left font-medium">称重时间</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {batchPreview.samples.map((s) => (
+                          <tr key={s.id} className="hover:bg-slate-50">
+                            <td className="px-3 py-2 text-slate-700">{s.dish_name}</td>
+                            <td className="px-3 py-2">
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                                s.anomaly_type === 'over_prep' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
+                              }`}>
+                                {s.anomaly_type === 'over_prep' ? '备餐过量' : '变质怀疑'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2">
+                              <span className={s.status === 'unresolved' ? 'text-amber-600' : 'text-emerald-600'}>
+                                {s.status === 'unresolved' ? '未结' : '已关闭'}
+                              </span>
+                            </td>
+                            <td className="px-3 py-2 text-slate-500">
+                              {new Date(s.record_time).toLocaleString()}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-slate-200 flex justify-end gap-2">
+              <button
+                onClick={() => {
+                  setShowPreviewModal(false);
+                  clearBatchPreview();
+                }}
+                className="px-4 py-2 bg-slate-100 text-slate-700 rounded text-sm hover:bg-slate-200"
+              >
+                关闭
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {showBatchModal && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
@@ -759,7 +1087,7 @@ export default function ReviewList() {
                   即将批量处理 <strong>{selectedUnresolvedCount}</strong> 条未结异常
                 </div>
                 <div className="text-xs text-slate-500 mt-1">
-                  已关闭状态的异常将被自动跳过
+                  已关闭状态的异常将被自动跳过，每条记录会进行状态检查
                 </div>
               </div>
               <div>
@@ -849,9 +1177,19 @@ export default function ReviewList() {
 
       {showBatchResult && batchOperationResult && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col">
+          <div className="bg-white rounded-lg shadow-xl max-w-2xl w-full max-h-[85vh] overflow-hidden flex flex-col">
             <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
-              <h3 className="font-semibold text-slate-800">批量操作结果</h3>
+              <h3 className="font-semibold text-slate-800 flex items-center gap-2">
+                <ListChecks className="w-5 h-5 text-primary-600" />
+                批量操作结果
+                <span className={`text-xs px-2 py-0.5 rounded ${
+                  batchOperationResult.action === 'resolve'
+                    ? 'bg-blue-100 text-blue-700'
+                    : 'bg-amber-100 text-amber-700'
+                }`}>
+                  {batchOperationResult.action === 'resolve' ? '批量关闭' : '批量撤销'}
+                </span>
+              </h3>
               <button
                 onClick={() => {
                   setShowBatchResult(false);
@@ -863,7 +1201,13 @@ export default function ReviewList() {
               </button>
             </div>
             <div className="flex-1 overflow-auto p-5 space-y-4">
-              <div className="grid grid-cols-3 gap-3 text-center">
+              <div className="grid grid-cols-4 gap-3 text-center">
+                <div className="bg-slate-50 rounded p-3">
+                  <div className="text-2xl font-bold text-slate-700">
+                    {batchOperationResult.total_submitted}
+                  </div>
+                  <div className="text-xs text-slate-500">提交总数</div>
+                </div>
                 <div className="bg-emerald-50 rounded p-3">
                   <div className="text-2xl font-bold text-emerald-600">
                     {batchOperationResult.success.length}
@@ -883,33 +1227,85 @@ export default function ReviewList() {
                   <div className="text-xs text-red-700">失败</div>
                 </div>
               </div>
-              <div className="text-xs text-slate-500">
-                批次操作ID：{batchOperationResult.batch_operation_id}
+
+              <div className="bg-slate-50 rounded p-3 text-xs space-y-1">
+                <div className="flex justify-between">
+                  <span className="text-slate-500">批次操作ID</span>
+                  <span className="font-mono text-slate-700">{batchOperationResult.batch_operation_id}</span>
+                </div>
+                <div className="flex justify-between">
+                  <span className="text-slate-500">操作时间</span>
+                  <span className="text-slate-700">{new Date(batchOperationResult.timestamp).toLocaleString()}</span>
+                </div>
+                {batchOperationResult.applied_reason && (
+                  <div className="flex justify-between gap-3">
+                    <span className="text-slate-500 flex-shrink-0">统一原因</span>
+                    <span className="text-slate-700 text-right">{batchOperationResult.applied_reason}</span>
+                  </div>
+                )}
               </div>
+
+              {batchOperationResult.success.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-emerald-700 mb-2">
+                    成功处理（{batchOperationResult.success.length} 条）
+                  </h4>
+                  <div className="bg-emerald-50 border border-emerald-200 rounded p-2 space-y-1 max-h-36 overflow-auto">
+                    {batchOperationResult.success.slice(0, 20).map((item) => (
+                      <div key={item.id} className="text-xs text-emerald-800 flex justify-between items-center">
+                        <div>
+                          <span className="font-mono opacity-70 mr-2">{item.id.slice(-8)}</span>
+                          {item.dish_name || ''}
+                        </div>
+                        <CheckCircle className="w-3 h-3" />
+                      </div>
+                    ))}
+                    {batchOperationResult.success.length > 20 && (
+                      <div className="text-xs text-emerald-600 text-center pt-1 border-t border-emerald-100">
+                        ...还有 {batchOperationResult.success.length - 20} 条
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
               {batchOperationResult.skipped.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold text-amber-700 mb-2">
                     跳过的异常（{batchOperationResult.skipped.length} 条）
                   </h4>
-                  <div className="bg-amber-50 border border-amber-200 rounded p-2 space-y-1 max-h-32 overflow-auto">
+                  <div className="bg-amber-50 border border-amber-200 rounded p-2 space-y-1.5 max-h-56 overflow-auto">
                     {batchOperationResult.skipped.map((item) => (
-                      <div key={item.id} className="text-xs text-amber-800 flex justify-between">
-                        <span className="font-mono">{item.id}</span>
-                        <span>{item.error}</span>
+                      <div key={item.id} className="text-xs flex items-start justify-between gap-2">
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-1.5">
+                            <span className="font-mono text-amber-700">{item.id.slice(-12)}</span>
+                            {item.dish_name && (
+                              <span className="text-amber-800 truncate">{item.dish_name}</span>
+                            )}
+                            {item.skip_reason && (
+                              <span className={`text-[10px] px-1.5 py-0.5 rounded flex-shrink-0 ${skipReasonBadge(item.skip_reason).color}`}>
+                                {skipReasonBadge(item.skip_reason).label}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-amber-600 mt-0.5 pl-1">{item.error}</div>
+                        </div>
                       </div>
                     ))}
                   </div>
                 </div>
               )}
+
               {batchOperationResult.failed.length > 0 && (
                 <div>
                   <h4 className="text-xs font-semibold text-red-700 mb-2">
                     失败的异常（{batchOperationResult.failed.length} 条）
                   </h4>
-                  <div className="bg-red-50 border border-red-200 rounded p-2 space-y-1 max-h-32 overflow-auto">
+                  <div className="bg-red-50 border border-red-200 rounded p-2 space-y-1 max-h-36 overflow-auto">
                     {batchOperationResult.failed.map((item) => (
                       <div key={item.id} className="text-xs text-red-800 flex justify-between">
-                        <span className="font-mono">{item.id}</span>
+                        <span className="font-mono">{item.id.slice(-12)}</span>
                         <span>{item.error}</span>
                       </div>
                     ))}

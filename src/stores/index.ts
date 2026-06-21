@@ -5,7 +5,10 @@ import type {
   AnomalyStatus,
   AnomalyType,
   Batch,
+  BatchFilterCriteria,
+  BatchOperationRecord,
   BatchOperationResponse,
+  BatchPreviewResponse,
   ManualResult,
   ReviewHistory,
   Rule,
@@ -56,6 +59,9 @@ interface AppState {
   anomalyDetail: AnomalyDetail | null;
   selectedAnomalyIds: Set<string>;
   batchOperationResult: BatchOperationResponse | null;
+  batchPreview: BatchPreviewResponse | null;
+  batchOperations: BatchOperationRecord[];
+  batchOperationDetail: { operation: BatchOperationRecord | null; history: ReviewHistory[] } | null;
   consistency: { ok: boolean; issues: string[]; stats: unknown } | null;
   lastValidation: ValidationResult | null;
   rulePreviews: RulePreviewDetail[];
@@ -74,9 +80,15 @@ interface AppState {
   toggleAnomalySelection: (id: string) => void;
   selectAllAnomalies: (status?: AnomalyStatus) => void;
   clearAnomalySelection: () => void;
-  batchResolveAnomalies: (ids: string[], reason: string, result: ManualResult, anomaly_type?: AnomalyType) => Promise<{ error?: string; result?: BatchOperationResponse }>;
-  batchReopenAnomalies: (ids: string[], reason?: string) => Promise<{ error?: string; result?: BatchOperationResponse }>;
+  batchPreviewAnomalies: (filter: BatchFilterCriteria, anomalyIds?: string[]) => Promise<{ error?: string; preview?: BatchPreviewResponse }>;
+  clearBatchPreview: () => void;
+  batchResolveAnomalies: (ids: string[], reason: string, result: ManualResult, anomaly_type?: AnomalyType, filter?: BatchFilterCriteria) => Promise<{ error?: string; result?: BatchOperationResponse }>;
+  batchResolveByFilter: (filter: BatchFilterCriteria, reason: string, result: ManualResult, anomaly_type?: AnomalyType) => Promise<{ error?: string; result?: BatchOperationResponse }>;
+  batchReopenAnomalies: (ids: string[], reason?: string, filter?: BatchFilterCriteria) => Promise<{ error?: string; result?: BatchOperationResponse }>;
+  batchReopenByFilter: (filter: BatchFilterCriteria, reason?: string) => Promise<{ error?: string; result?: BatchOperationResponse }>;
   fetchBatchOperationHistory: (batchOperationId: string) => Promise<ReviewHistory[] | null>;
+  fetchBatchOperations: () => Promise<void>;
+  fetchBatchOperationDetail: (batchOperationId: string) => Promise<void>;
   setBatchOperationResult: (r: BatchOperationResponse | null) => void;
   createRule: (r: Omit<Rule, 'id' | 'created_at' | 'is_active'>) => Promise<{ error?: string; issues?: ValidationIssue[] }>;
   activateRule: (id: string) => Promise<void>;
@@ -113,6 +125,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   anomalyDetail: null,
   selectedAnomalyIds: new Set(),
   batchOperationResult: null,
+  batchPreview: null,
+  batchOperations: [],
+  batchOperationDetail: null,
   consistency: null,
   lastValidation: null,
   rulePreviews: [],
@@ -240,9 +255,38 @@ export const useAppStore = create<AppState>((set, get) => ({
     set({ selectedAnomalyIds: new Set(), batchOperationResult: null });
   },
 
-  batchResolveAnomalies: async (ids, reason, result, anomaly_type) => {
+  batchPreviewAnomalies: async (filter, anomalyIds) => {
+    try {
+      const body: Record<string, unknown> = { filter };
+      if (anomalyIds && anomalyIds.length > 0) body.anomaly_ids = anomalyIds;
+      const r = await api('/anomalies/batch-preview', {
+        method: 'POST',
+        body: JSON.stringify(body),
+      });
+      const raw = await r.json();
+      const data = raw as BatchPreviewResponse;
+      if (!r.ok) {
+        const errMsg = (raw && (raw as { error?: string }).error) || '预览生成失败';
+        get().setToast({ msg: errMsg, type: 'error' });
+        return { error: errMsg };
+      }
+      set({ batchPreview: data });
+      return { preview: data };
+    } catch (e) {
+      const msg = (e as Error).message;
+      get().setToast({ msg: '预览生成失败', type: 'error' });
+      return { error: msg };
+    }
+  },
+
+  clearBatchPreview: () => {
+    set({ batchPreview: null });
+  },
+
+  batchResolveAnomalies: async (ids, reason, result, anomaly_type, filter) => {
     const body: Record<string, unknown> = { anomaly_ids: ids, reason, result };
     if (anomaly_type) body.anomaly_type = anomaly_type;
+    if (filter) body.filter = filter;
     const r = await api('/anomalies/batch-resolve', {
       method: 'POST',
       body: JSON.stringify(body),
@@ -252,7 +296,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().setToast({ msg: data.error || '批量处理失败', type: 'error' });
       return { error: data.error };
     }
-    set({ batchOperationResult: data, selectedAnomalyIds: new Set() });
+    set({ batchOperationResult: data, selectedAnomalyIds: new Set(), batchPreview: null });
     const successCount = data.success.length;
     const skipCount = data.skipped.length;
     const failCount = data.failed.length;
@@ -266,20 +310,57 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (get().selectedBatchId) {
       await get().fetchBatches();
     }
+    await get().fetchBatchOperations();
     return { result: data };
   },
 
-  batchReopenAnomalies: async (ids, reason) => {
+  batchResolveByFilter: async (filter, reason, result, anomaly_type) => {
+    const body: Record<string, unknown> = { filter, reason, result };
+    if (anomaly_type) body.anomaly_type = anomaly_type;
+    const r = await api('/anomalies/batch-resolve-by-filter', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    const data = (await r.json()) as BatchOperationResponse;
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '按筛选批量处理失败', type: 'error' });
+      return { error: data.error };
+    }
+    set({ batchOperationResult: data, selectedAnomalyIds: new Set(), batchPreview: null });
+    const successCount = data.success.length;
+    const skipCount = data.skipped.length;
+    const failCount = data.failed.length;
+    let msg = `按筛选批量处理完成：成功 ${successCount} 条`;
+    if (data.total_submitted === 0) msg = data.error || '筛选条件下没有可处理的异常';
+    else {
+      if (skipCount > 0) msg += `，跳过 ${skipCount} 条`;
+      if (failCount > 0) msg += `，失败 ${failCount} 条`;
+    }
+    get().setToast({
+      msg,
+      type: data.total_submitted === 0 ? 'info' : failCount > 0 ? 'error' : skipCount > 0 ? 'info' : 'success',
+    });
+    if (get().selectedBatchId) {
+      await get().fetchBatches();
+    }
+    await get().fetchBatchOperations();
+    return { result: data };
+  },
+
+  batchReopenAnomalies: async (ids, reason, filter) => {
+    const body: Record<string, unknown> = { anomaly_ids: ids };
+    if (reason) body.reason = reason;
+    if (filter) body.filter = filter;
     const r = await api('/anomalies/batch-reopen', {
       method: 'POST',
-      body: JSON.stringify({ anomaly_ids: ids, reason }),
+      body: JSON.stringify(body),
     });
     const data = (await r.json()) as BatchOperationResponse;
     if (!r.ok) {
       get().setToast({ msg: data.error || '批量撤销失败', type: 'error' });
       return { error: data.error };
     }
-    set({ batchOperationResult: data, selectedAnomalyIds: new Set() });
+    set({ batchOperationResult: data, selectedAnomalyIds: new Set(), batchPreview: null });
     const successCount = data.success.length;
     const skipCount = data.skipped.length;
     const failCount = data.failed.length;
@@ -293,13 +374,64 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (get().selectedBatchId) {
       await get().fetchBatches();
     }
+    await get().fetchBatchOperations();
+    return { result: data };
+  },
+
+  batchReopenByFilter: async (filter, reason) => {
+    const body: Record<string, unknown> = { filter };
+    if (reason) body.reason = reason;
+    const r = await api('/anomalies/batch-reopen-by-filter', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    const data = (await r.json()) as BatchOperationResponse;
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '按筛选批量撤销失败', type: 'error' });
+      return { error: data.error };
+    }
+    set({ batchOperationResult: data, selectedAnomalyIds: new Set(), batchPreview: null });
+    const successCount = data.success.length;
+    const skipCount = data.skipped.length;
+    const failCount = data.failed.length;
+    let msg = `按筛选批量撤销完成：成功 ${successCount} 条`;
+    if (data.total_submitted === 0) msg = data.error || '筛选条件下没有可恢复的异常';
+    else {
+      if (skipCount > 0) msg += `，跳过 ${skipCount} 条`;
+      if (failCount > 0) msg += `，失败 ${failCount} 条`;
+    }
+    get().setToast({
+      msg,
+      type: data.total_submitted === 0 ? 'info' : failCount > 0 ? 'error' : skipCount > 0 ? 'info' : 'success',
+    });
+    if (get().selectedBatchId) {
+      await get().fetchBatches();
+    }
+    await get().fetchBatchOperations();
     return { result: data };
   },
 
   fetchBatchOperationHistory: async (batchOperationId) => {
     const r = await api(`/anomalies/batch-operation/${batchOperationId}`);
     if (!r.ok) return null;
-    return (await r.json()) as ReviewHistory[];
+    const data = await r.json();
+    return data.history as ReviewHistory[];
+  },
+
+  fetchBatchOperations: async () => {
+    const r = await api('/anomalies/batch-operations/list');
+    if (r.ok) {
+      const data = await r.json();
+      set({ batchOperations: data as BatchOperationRecord[] });
+    }
+  },
+
+  fetchBatchOperationDetail: async (batchOperationId) => {
+    const r = await api(`/anomalies/batch-operation/${batchOperationId}`);
+    if (r.ok) {
+      const data = await r.json();
+      set({ batchOperationDetail: data as { operation: BatchOperationRecord | null; history: ReviewHistory[] } });
+    }
   },
 
   setBatchOperationResult: (r) => set({ batchOperationResult: r }),

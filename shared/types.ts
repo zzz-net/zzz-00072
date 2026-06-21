@@ -69,6 +69,65 @@ export interface BatchOperationResultItem {
   id: string;
   success: boolean;
   error?: string;
+  skip_reason?: SkipReasonCode;
+  previous_status?: AnomalyStatus;
+  previous_result?: ManualResult;
+  dish_name?: string;
+}
+
+export type SkipReasonCode =
+  | 'not_found'
+  | 'already_resolved'
+  | 'already_unresolved'
+  | 'status_changed_by_other'
+  | 'reopened_after_batch'
+  | 'modified_individually'
+  | 'batch_mismatch';
+
+export interface BatchFilterCriteria {
+  batch_ids?: string[];
+  status?: AnomalyStatus;
+  anomaly_types?: AnomalyType[];
+  manual_results?: ManualResult[];
+  time_start?: string;
+  time_end?: string;
+  created_start?: string;
+  created_end?: string;
+  dish_name_keyword?: string;
+}
+
+export interface BatchPreviewAnomaly {
+  id: string;
+  batch_id: string;
+  anomaly_type: AnomalyType;
+  status: AnomalyStatus;
+  manual_result: ManualResult;
+  dish_name: string;
+  planned_weight: number;
+  actual_weight: number;
+  temperature: number | null;
+  record_time: string;
+  created_at: string;
+  resolved_at: string | null;
+  evidence_summary: string;
+}
+
+export interface BatchPreviewResponse {
+  filter: BatchFilterCriteria;
+  matched_count: number;
+  by_batch: {
+    batch_id: string;
+    batch_name: string;
+    count: number;
+    unresolved_count: number;
+    resolved_count: number;
+  }[];
+  by_type: { type: AnomalyType; label: string; count: number }[];
+  by_status: { status: AnomalyStatus; label: string; count: number }[];
+  samples: BatchPreviewAnomaly[];
+  estimated_unresolved_actionable: number;
+  estimated_resolved_actionable: number;
+  error?: string;
 }
 
 export interface BatchResolveRequest {
@@ -76,10 +135,26 @@ export interface BatchResolveRequest {
   reason: string;
   result: ManualResult;
   anomaly_type?: AnomalyType;
+  filter?: BatchFilterCriteria;
+  preview_token?: string;
 }
 
 export interface BatchReopenRequest {
   anomaly_ids: string[];
+  reason?: string;
+  filter?: BatchFilterCriteria;
+  preview_token?: string;
+}
+
+export interface BatchFilterResolveRequest {
+  filter: BatchFilterCriteria;
+  reason: string;
+  result: ManualResult;
+  anomaly_type?: AnomalyType;
+}
+
+export interface BatchFilterReopenRequest {
+  filter: BatchFilterCriteria;
   reason?: string;
 }
 
@@ -88,7 +163,27 @@ export interface BatchOperationResponse {
   success: BatchOperationResultItem[];
   skipped: BatchOperationResultItem[];
   failed: BatchOperationResultItem[];
+  total_submitted: number;
+  action: 'resolve' | 'reopen';
+  applied_result?: ManualResult;
+  applied_reason?: string;
+  timestamp: string;
   error?: string;
+}
+
+export interface BatchOperationRecord {
+  id: string;
+  action: 'resolve' | 'reopen';
+  applied_result: ManualResult;
+  applied_reason: string;
+  applied_anomaly_type?: AnomalyType | null;
+  filter_snapshot?: string | null;
+  total_submitted: number;
+  success_count: number;
+  skipped_count: number;
+  failed_count: number;
+  operator: string;
+  timestamp: string;
 }
 
 export interface AnomalyDetail extends Anomaly {
