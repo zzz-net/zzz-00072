@@ -62,6 +62,33 @@ export interface ReviewHistory {
   result: ManualResult;
   operator: string;
   timestamp: string;
+  batch_operation_id?: string | null;
+}
+
+export interface BatchOperationResultItem {
+  id: string;
+  success: boolean;
+  error?: string;
+}
+
+export interface BatchResolveRequest {
+  anomaly_ids: string[];
+  reason: string;
+  result: ManualResult;
+  anomaly_type?: AnomalyType;
+}
+
+export interface BatchReopenRequest {
+  anomaly_ids: string[];
+  reason?: string;
+}
+
+export interface BatchOperationResponse {
+  batch_operation_id: string;
+  success: BatchOperationResultItem[];
+  skipped: BatchOperationResultItem[];
+  failed: BatchOperationResultItem[];
+  error?: string;
 }
 
 export interface AnomalyDetail extends Anomaly {

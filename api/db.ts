@@ -80,6 +80,7 @@ export function initDatabase(): void {
       result TEXT,
       operator TEXT NOT NULL,
       timestamp TEXT NOT NULL,
+      batch_operation_id TEXT,
       FOREIGN KEY (anomaly_id) REFERENCES anomalies(id) ON DELETE CASCADE
     );
 
@@ -129,6 +130,13 @@ export function initDatabase(): void {
     CREATE INDEX IF NOT EXISTS idx_activation_logs_created ON rule_activation_logs(created_at);
     CREATE INDEX IF NOT EXISTS idx_rollback_packages_created ON rule_rollback_packages(created_at);
   `);
+
+  const columns = db.prepare('PRAGMA table_info(review_history)').all() as { name: string }[];
+  const hasBatchOpId = columns.some(c => c.name === 'batch_operation_id');
+  if (!hasBatchOpId) {
+    db.exec(`ALTER TABLE review_history ADD COLUMN batch_operation_id TEXT;`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_history_batch_operation ON review_history(batch_operation_id);`);
 
   const ruleCount = db.prepare('SELECT COUNT(*) as cnt FROM rules').get() as { cnt: number };
   if (ruleCount.cnt === 0) {

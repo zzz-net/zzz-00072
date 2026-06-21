@@ -66,11 +66,12 @@ router.get('/history', (req: Request, res: Response) => {
     history = db.prepare('SELECT * FROM review_history ORDER BY timestamp DESC').all() as ReviewHistory[];
   }
 
-  let csv = '异常ID,操作,原因,判定结果,操作人,时间\n';
+  let csv = '异常ID,操作,原因,判定结果,操作人,时间,批量操作ID\n';
   history.forEach((h) => {
     const actionLabel = h.action === 'resolve' ? '关闭' : '撤销';
     const resultLabel = h.result === 'confirmed' ? '确认异常' : h.result === 'normal' ? '判定正常' : '';
-    csv += `${h.anomaly_id},${actionLabel},"${(h.reason || '').replace(/"/g, '""')}",${resultLabel},${h.operator},${h.timestamp}\n`;
+    const batchOpId = (h as ReviewHistory & { batch_operation_id?: string | null }).batch_operation_id || '';
+    csv += `${h.anomaly_id},${actionLabel},"${(h.reason || '').replace(/"/g, '""')}",${resultLabel},${h.operator},${h.timestamp},${batchOpId}\n`;
   });
 
   const date = new Date().toISOString().slice(0, 10);

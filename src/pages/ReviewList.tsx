@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useMemo } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import {
   ArrowLeft,
@@ -11,6 +11,11 @@ import {
   AlertCircle,
   Clock,
   FileText,
+  CheckSquare,
+  Square,
+  XCircle,
+  Info,
+  X,
 } from 'lucide-react';
 import { useAppStore } from '@/stores';
 import type { Anomaly, AnomalyStatus, ManualResult, AnomalyType } from '@shared/types';
@@ -21,12 +26,20 @@ export default function ReviewList() {
     batches,
     anomalies,
     anomalyDetail,
+    selectedAnomalyIds,
+    batchOperationResult,
     fetchAnomalies,
     fetchAnomalyDetail,
     resolveAnomaly,
     reopenAnomaly,
     fetchBatches,
     selectBatch,
+    toggleAnomalySelection,
+    selectAllAnomalies,
+    clearAnomalySelection,
+    batchResolveAnomalies,
+    batchReopenAnomalies,
+    setBatchOperationResult,
   } = useAppStore();
 
   const [statusFilter, setStatusFilter] = useState<AnomalyStatus | 'all'>('all');
@@ -35,8 +48,85 @@ export default function ReviewList() {
   const [resolveResult, setResolveResult] = useState<ManualResult>(null);
   const [reopenReason, setReopenReason] = useState('');
   const [overrideType, setOverrideType] = useState<AnomalyType | ''>('');
+  const [showBatchModal, setShowBatchModal] = useState(false);
+  const [showBatchReopenModal, setShowBatchReopenModal] = useState(false);
+  const [batchResolveResult, setBatchResolveResult] = useState<ManualResult>(null);
+  const [batchReason, setBatchReason] = useState('');
+  const [batchReopenReason, setBatchReopenReason] = useState('');
+  const [showBatchResult, setShowBatchResult] = useState(false);
 
   const batch = batches.find((b) => b.id === id);
+
+  const selectedUnresolvedCount = useMemo(() => {
+    return anomalies.filter(
+      (a) => a.status === 'unresolved' && selectedAnomalyIds.has(a.id)
+    ).length;
+  }, [anomalies, selectedAnomalyIds]);
+
+  const selectedResolvedCount = useMemo(() => {
+    return anomalies.filter(
+      (a) => a.status === 'resolved' && selectedAnomalyIds.has(a.id)
+    ).length;
+  }, [anomalies, selectedAnomalyIds]);
+
+  const handleSelectAll = () => {
+    selectAllAnomalies(statusFilter === 'all' ? undefined : statusFilter);
+  };
+
+  const openBatchResolveModal = (result: ManualResult) => {
+    setBatchResolveResult(result);
+    setBatchReason('');
+    setShowBatchModal(true);
+  };
+
+  const handleBatchResolve = async () => {
+    if (!batchResolveResult || !batchReason) return;
+    const ids = Array.from(selectedAnomalyIds).filter((aid) =>
+      anomalies.some((a) => a.id === aid && a.status === 'unresolved')
+    );
+    if (ids.length === 0) return;
+
+    const r = await batchResolveAnomalies(ids, batchReason, batchResolveResult);
+    if (r.result) {
+      setShowBatchModal(false);
+      setShowBatchResult(true);
+      await Promise.all([
+        fetchAnomalies(
+          id,
+          statusFilter === 'all' ? undefined : statusFilter,
+          typeFilter === 'all' ? undefined : typeFilter
+        ),
+        anomalyDetail ? fetchAnomalyDetail(anomalyDetail.id) : Promise.resolve(),
+      ]);
+    }
+  };
+
+  const openBatchReopenModal = () => {
+    setBatchReopenReason('');
+    setShowBatchReopenModal(true);
+  };
+
+  const handleBatchReopen = async () => {
+    const ids = Array.from(selectedAnomalyIds).filter((aid) =>
+      anomalies.some((a) => a.id === aid && a.status === 'resolved')
+    );
+    if (ids.length === 0) return;
+
+    const reason = batchReopenReason || undefined;
+    const r = await batchReopenAnomalies(ids, reason);
+    if (r.result) {
+      setShowBatchReopenModal(false);
+      setShowBatchResult(true);
+      await Promise.all([
+        fetchAnomalies(
+          id,
+          statusFilter === 'all' ? undefined : statusFilter,
+          typeFilter === 'all' ? undefined : typeFilter
+        ),
+        anomalyDetail ? fetchAnomalyDetail(anomalyDetail.id) : Promise.resolve(),
+      ]);
+    }
+  };
 
   useEffect(() => {
     fetchBatches();
@@ -169,11 +259,80 @@ export default function ReviewList() {
         </div>
       </div>
 
+      {selectedAnomalyIds.size > 0 && (
+        <div className="bg-primary-50 border border-primary-200 rounded-lg p-3 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 flex-wrap">
+            <CheckSquare className="w-4 h-4 text-primary-600" />
+            <span className="text-sm text-slate-700">
+              已选中 <strong>{selectedAnomalyIds.size}</strong> 条
+              {selectedUnresolvedCount > 0 && (
+                <span className="ml-2 text-amber-600">
+                  （未结 {selectedUnresolvedCount} 条）
+                </span>
+              )}
+              {selectedResolvedCount > 0 && (
+                <span className="ml-2 text-emerald-600">
+                  （已关闭 {selectedResolvedCount} 条）
+                </span>
+              )}
+            </span>
+          </div>
+          <div className="flex items-center gap-2 flex-wrap">
+            {selectedUnresolvedCount > 0 && (
+              <>
+                <button
+                  onClick={() => openBatchResolveModal('normal')}
+                  className="px-3 py-1.5 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700 inline-flex items-center gap-1"
+                >
+                  <CheckCircle className="w-3.5 h-3.5" />
+                  批量判定正常（误报）
+                </button>
+                <button
+                  onClick={() => openBatchResolveModal('confirmed')}
+                  className="px-3 py-1.5 bg-red-600 text-white rounded text-xs hover:bg-red-700 inline-flex items-center gap-1"
+                >
+                  <XCircle className="w-3.5 h-3.5" />
+                  批量确认异常
+                </button>
+              </>
+            )}
+            {selectedResolvedCount > 0 && (
+              <button
+                onClick={openBatchReopenModal}
+                className="px-3 py-1.5 bg-amber-500 text-white rounded text-xs hover:bg-amber-600 inline-flex items-center gap-1"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+                批量撤销关闭
+              </button>
+            )}
+            <button
+              onClick={clearAnomalySelection}
+              className="px-3 py-1.5 bg-slate-200 text-slate-700 rounded text-xs hover:bg-slate-300"
+            >
+              取消选择
+            </button>
+          </div>
+        </div>
+      )}
+
       <div className="grid grid-cols-12 gap-4 min-h-[600px]">
         <div className="col-span-5 bg-white border border-slate-200 rounded-lg overflow-hidden flex flex-col">
-          <div className="px-4 py-2.5 border-b border-slate-200 text-sm font-medium text-slate-700 flex items-center gap-2">
-            <AlertCircle className="w-4 h-4 text-primary-600" />
-            异常列表
+          <div className="px-4 py-2.5 border-b border-slate-200 text-sm font-medium text-slate-700 flex items-center justify-between">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-primary-600" />
+              异常列表
+            </div>
+            <button
+              onClick={handleSelectAll}
+              className="text-xs text-primary-600 hover:text-primary-700 inline-flex items-center gap-1"
+            >
+              {selectedAnomalyIds.size === anomalies.length && anomalies.length > 0 ? (
+                <CheckSquare className="w-3.5 h-3.5" />
+              ) : (
+                <Square className="w-3.5 h-3.5" />
+              )}
+              全选当前筛选
+            </button>
           </div>
           <div className="flex-1 overflow-auto scrollbar-thin">
             {anomalies.length === 0 ? (
@@ -182,6 +341,7 @@ export default function ReviewList() {
               anomalies.map((a) => {
                 const tb = anomalyTypeBadge(a.anomaly_type);
                 const active = currentDetail?.id === a.id;
+                const selected = selectedAnomalyIds.has(a.id);
                 return (
                   <div
                     key={a.id}
@@ -189,11 +349,27 @@ export default function ReviewList() {
                     className={`px-4 py-3 border-l-4 cursor-pointer transition-all ${
                       active
                         ? 'border-primary-600 bg-primary-50/60'
+                        : selected
+                        ? 'border-primary-300 bg-primary-50/30'
                         : 'border-transparent hover:bg-slate-50'
                     } border-b border-slate-100`}
                   >
                     <div className="flex items-start justify-between gap-2">
-                      <div className="flex-1 min-w-0">
+                      <div className="flex items-start gap-2 flex-1 min-w-0">
+                        <div
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            toggleAnomalySelection(a.id);
+                          }}
+                          className="mt-0.5 flex-shrink-0"
+                        >
+                          {selected ? (
+                            <CheckSquare className="w-4 h-4 text-primary-600" />
+                          ) : (
+                            <Square className="w-4 h-4 text-slate-400" />
+                          )}
+                        </div>
+                        <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2">
                           <tb.icon
                             className={`w-4 h-4 ${
@@ -214,6 +390,7 @@ export default function ReviewList() {
                             }
                           })() : '命中规则'}
                         </p>
+                      </div>
                       </div>
                       <span className={`text-[11px] px-1.5 py-0.5 rounded ${tb.color}`}>
                         {tb.label}
@@ -531,6 +708,11 @@ export default function ReviewList() {
                                   · 判定为{h.result === 'normal' ? '正常' : '异常'}
                                 </span>
                               )}
+                              {h.batch_operation_id && (
+                                <span className="ml-2 text-[10px] bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">
+                                  批量操作
+                                </span>
+                              )}
                             </div>
                             <div className="text-slate-400 mt-0.5">
                               {h.reason} · {new Date(h.timestamp).toLocaleString()}
@@ -555,6 +737,200 @@ export default function ReviewList() {
           )}
         </div>
       </div>
+
+      {showBatchModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-800">
+                批量{batchResolveResult === 'normal' ? '判定正常（误报）' : '确认异常'}
+              </h3>
+              <button
+                onClick={() => setShowBatchModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="bg-slate-50 rounded p-3 text-sm text-slate-600">
+                <div className="flex items-center gap-2">
+                  <Info className="w-4 h-4 text-primary-600" />
+                  即将批量处理 <strong>{selectedUnresolvedCount}</strong> 条未结异常
+                </div>
+                <div className="text-xs text-slate-500 mt-1">
+                  已关闭状态的异常将被自动跳过
+                </div>
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">复核原因（必填）</label>
+                <textarea
+                  value={batchReason}
+                  onChange={(e) => setBatchReason(e.target.value)}
+                  rows={4}
+                  placeholder="请填写统一的复核原因，将应用于所有选中的异常"
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowBatchModal(false)}
+                  className="flex-1 py-2 bg-slate-100 text-slate-700 rounded text-sm hover:bg-slate-200"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleBatchResolve}
+                  disabled={!batchReason.trim()}
+                  className={`flex-1 py-2 text-white rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed ${
+                    batchResolveResult === 'normal'
+                      ? 'bg-emerald-600 hover:bg-emerald-700'
+                      : 'bg-red-600 hover:bg-red-700'
+                  }`}
+                >
+                  确认批量提交
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBatchReopenModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-800">批量撤销关闭</h3>
+              <button
+                onClick={() => setShowBatchReopenModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="bg-slate-50 rounded p-3 text-sm text-slate-600">
+                <div className="flex items-center gap-2">
+                  <Info className="w-4 h-4 text-amber-600" />
+                  即将批量恢复 <strong>{selectedResolvedCount}</strong> 条已关闭异常为未结状态
+                </div>
+                <div className="text-xs text-slate-500 mt-1">
+                  未结状态的异常将被自动跳过
+                </div>
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">撤销原因（可选）</label>
+                <textarea
+                  value={batchReopenReason}
+                  onChange={(e) => setBatchReopenReason(e.target.value)}
+                  rows={4}
+                  placeholder="请填写撤销原因（可选），将应用于所有选中的异常"
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowBatchReopenModal(false)}
+                  className="flex-1 py-2 bg-slate-100 text-slate-700 rounded text-sm hover:bg-slate-200"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleBatchReopen}
+                  className="flex-1 py-2 bg-amber-600 text-white rounded text-sm hover:bg-amber-700"
+                >
+                  确认批量撤销
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showBatchResult && batchOperationResult && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-800">批量操作结果</h3>
+              <button
+                onClick={() => {
+                  setShowBatchResult(false);
+                  setBatchOperationResult(null);
+                }}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto p-5 space-y-4">
+              <div className="grid grid-cols-3 gap-3 text-center">
+                <div className="bg-emerald-50 rounded p-3">
+                  <div className="text-2xl font-bold text-emerald-600">
+                    {batchOperationResult.success.length}
+                  </div>
+                  <div className="text-xs text-emerald-700">成功</div>
+                </div>
+                <div className="bg-amber-50 rounded p-3">
+                  <div className="text-2xl font-bold text-amber-600">
+                    {batchOperationResult.skipped.length}
+                  </div>
+                  <div className="text-xs text-amber-700">跳过</div>
+                </div>
+                <div className="bg-red-50 rounded p-3">
+                  <div className="text-2xl font-bold text-red-600">
+                    {batchOperationResult.failed.length}
+                  </div>
+                  <div className="text-xs text-red-700">失败</div>
+                </div>
+              </div>
+              <div className="text-xs text-slate-500">
+                批次操作ID：{batchOperationResult.batch_operation_id}
+              </div>
+              {batchOperationResult.skipped.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-amber-700 mb-2">
+                    跳过的异常（{batchOperationResult.skipped.length} 条）
+                  </h4>
+                  <div className="bg-amber-50 border border-amber-200 rounded p-2 space-y-1 max-h-32 overflow-auto">
+                    {batchOperationResult.skipped.map((item) => (
+                      <div key={item.id} className="text-xs text-amber-800 flex justify-between">
+                        <span className="font-mono">{item.id}</span>
+                        <span>{item.error}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {batchOperationResult.failed.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-red-700 mb-2">
+                    失败的异常（{batchOperationResult.failed.length} 条）
+                  </h4>
+                  <div className="bg-red-50 border border-red-200 rounded p-2 space-y-1 max-h-32 overflow-auto">
+                    {batchOperationResult.failed.map((item) => (
+                      <div key={item.id} className="text-xs text-red-800 flex justify-between">
+                        <span className="font-mono">{item.id}</span>
+                        <span>{item.error}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="px-5 py-3 border-t border-slate-200">
+              <button
+                onClick={() => {
+                  setShowBatchResult(false);
+                  setBatchOperationResult(null);
+                }}
+                className="w-full py-2 bg-primary-700 text-white rounded text-sm hover:bg-primary-600"
+              >
+                知道了
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

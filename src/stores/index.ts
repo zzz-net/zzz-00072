@@ -5,7 +5,9 @@ import type {
   AnomalyStatus,
   AnomalyType,
   Batch,
+  BatchOperationResponse,
   ManualResult,
+  ReviewHistory,
   Rule,
   RulePreviewDetail,
   RuleActivationLogDetail,
@@ -52,6 +54,8 @@ interface AppState {
   selectedBatchId: string | null;
   anomalies: Anomaly[];
   anomalyDetail: AnomalyDetail | null;
+  selectedAnomalyIds: Set<string>;
+  batchOperationResult: BatchOperationResponse | null;
   consistency: { ok: boolean; issues: string[]; stats: unknown } | null;
   lastValidation: ValidationResult | null;
   rulePreviews: RulePreviewDetail[];
@@ -67,6 +71,13 @@ interface AppState {
   fetchAnomalyDetail: (id: string) => Promise<void>;
   resolveAnomaly: (id: string, reason: string, result: ManualResult, anomaly_type?: AnomalyType) => Promise<{ error?: string }>;
   reopenAnomaly: (id: string, reason?: string) => Promise<{ error?: string }>;
+  toggleAnomalySelection: (id: string) => void;
+  selectAllAnomalies: (status?: AnomalyStatus) => void;
+  clearAnomalySelection: () => void;
+  batchResolveAnomalies: (ids: string[], reason: string, result: ManualResult, anomaly_type?: AnomalyType) => Promise<{ error?: string; result?: BatchOperationResponse }>;
+  batchReopenAnomalies: (ids: string[], reason?: string) => Promise<{ error?: string; result?: BatchOperationResponse }>;
+  fetchBatchOperationHistory: (batchOperationId: string) => Promise<ReviewHistory[] | null>;
+  setBatchOperationResult: (r: BatchOperationResponse | null) => void;
   createRule: (r: Omit<Rule, 'id' | 'created_at' | 'is_active'>) => Promise<{ error?: string; issues?: ValidationIssue[] }>;
   activateRule: (id: string) => Promise<void>;
   checkConsistency: () => Promise<void>;
@@ -100,6 +111,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectedBatchId: null,
   anomalies: [],
   anomalyDetail: null,
+  selectedAnomalyIds: new Set(),
+  batchOperationResult: null,
   consistency: null,
   lastValidation: null,
   rulePreviews: [],
@@ -203,6 +216,93 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     return { data };
   },
+
+  toggleAnomalySelection: (id) => {
+    const current = get().selectedAnomalyIds;
+    const next = new Set(current);
+    if (next.has(id)) {
+      next.delete(id);
+    } else {
+      next.add(id);
+    }
+    set({ selectedAnomalyIds: next });
+  },
+
+  selectAllAnomalies: (status) => {
+    const { anomalies } = get();
+    const targetIds = anomalies
+      .filter((a) => !status || a.status === status)
+      .map((a) => a.id);
+    set({ selectedAnomalyIds: new Set(targetIds) });
+  },
+
+  clearAnomalySelection: () => {
+    set({ selectedAnomalyIds: new Set(), batchOperationResult: null });
+  },
+
+  batchResolveAnomalies: async (ids, reason, result, anomaly_type) => {
+    const body: Record<string, unknown> = { anomaly_ids: ids, reason, result };
+    if (anomaly_type) body.anomaly_type = anomaly_type;
+    const r = await api('/anomalies/batch-resolve', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    });
+    const data = (await r.json()) as BatchOperationResponse;
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '批量处理失败', type: 'error' });
+      return { error: data.error };
+    }
+    set({ batchOperationResult: data, selectedAnomalyIds: new Set() });
+    const successCount = data.success.length;
+    const skipCount = data.skipped.length;
+    const failCount = data.failed.length;
+    let msg = `批量处理完成：成功 ${successCount} 条`;
+    if (skipCount > 0) msg += `，跳过 ${skipCount} 条`;
+    if (failCount > 0) msg += `，失败 ${failCount} 条`;
+    get().setToast({
+      msg,
+      type: failCount > 0 ? 'error' : skipCount > 0 ? 'info' : 'success',
+    });
+    if (get().selectedBatchId) {
+      await get().fetchBatches();
+    }
+    return { result: data };
+  },
+
+  batchReopenAnomalies: async (ids, reason) => {
+    const r = await api('/anomalies/batch-reopen', {
+      method: 'POST',
+      body: JSON.stringify({ anomaly_ids: ids, reason }),
+    });
+    const data = (await r.json()) as BatchOperationResponse;
+    if (!r.ok) {
+      get().setToast({ msg: data.error || '批量撤销失败', type: 'error' });
+      return { error: data.error };
+    }
+    set({ batchOperationResult: data, selectedAnomalyIds: new Set() });
+    const successCount = data.success.length;
+    const skipCount = data.skipped.length;
+    const failCount = data.failed.length;
+    let msg = `批量撤销完成：成功 ${successCount} 条`;
+    if (skipCount > 0) msg += `，跳过 ${skipCount} 条`;
+    if (failCount > 0) msg += `，失败 ${failCount} 条`;
+    get().setToast({
+      msg,
+      type: failCount > 0 ? 'error' : skipCount > 0 ? 'info' : 'success',
+    });
+    if (get().selectedBatchId) {
+      await get().fetchBatches();
+    }
+    return { result: data };
+  },
+
+  fetchBatchOperationHistory: async (batchOperationId) => {
+    const r = await api(`/anomalies/batch-operation/${batchOperationId}`);
+    if (!r.ok) return null;
+    return (await r.json()) as ReviewHistory[];
+  },
+
+  setBatchOperationResult: (r) => set({ batchOperationResult: r }),
 
   createRule: async (r) => {
     const resp = await api('/rules', { method: 'POST', body: JSON.stringify(r) });
