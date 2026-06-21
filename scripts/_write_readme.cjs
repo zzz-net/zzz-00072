@@ -1,4 +1,6 @@
-# 食堂损耗复核台
+const fs = require('fs');
+
+const content = `# 食堂损耗复核台
 
 面向餐饮企业内部质量管理的本地 Web 应用，用于食堂备餐称重数据的规则化异常识别、人工复核改判与历史追溯。
 
@@ -20,38 +22,38 @@
 
 ## 快速启动
 
-```bash
+` + "```" + `bash
 # 安装依赖
 npm install
 
 # 同时启动前端 (Vite 端口 5173) 和后端 (Express 端口 3002)
 npm run dev
-```
+` + "```" + `
 
 启动后访问：<http://localhost:5173>
 
 | 命令 | 说明 |
 |--------|------|
-| `npm run dev` | 同时启动前后端开发服务器 |
-| `npm run server:dev` | 仅启动后端（Express + nodemon 热重载） |
-| `npm run client:dev` | 仅启动前端（Vite） |
-| `npm run build` | 构建生产版本 |
-| `npm run check` | TypeScript 类型检查 |
+| ` + "`" + `npm run dev` + "`" + ` | 同时启动前后端开发服务器 |
+| ` + "`" + `npm run server:dev` + "`" + ` | 仅启动后端（Express + nodemon 热重载） |
+| ` + "`" + `npm run client:dev` + "`" + ` | 仅启动前端（Vite） |
+| ` + "`" + `npm run build` + "`" + ` | 构建生产版本 |
+| ` + "`" + `npm run check` + "`" + ` | TypeScript 类型检查 |
 
 ## 使用流程（界面说明）
 
-### 1. 批次列表页（`/batches`）
+### 1. 批次列表页（` + "`" + `/batches` + "`" + `）
 
 打开应用默认进入此页。
 
 - 点击右上角 **「导入样例批次」**：一键生成包含负数重量、备餐过量、变质怀疑的样例数据，快速体验完整流程
-- 点击 **「导入 CSV」**：上传自定义 CSV，列需包含 `dish_name,planned_weight,actual_weight,temperature,timestamp`
+- 点击 **「导入 CSV」**：上传自定义 CSV，列需包含 ` + "`" + `dish_name,planned_weight,actual_weight,temperature,timestamp` + "`" + `
 - 每个批次卡片显示：总记录、有效记录、异常数、未结数、复核进度条
 - 若包含负数重量等无效数据时，卡片显示琥珀色提示「包含 N 条无效记录」
 - 再次导入同批次名会提示「该批次已存在」（重复批次保护）
 - 点击卡片进入该批次的异常复核页
 
-### 2. 异常复核页（`/batches/:id`）
+### 2. 异常复核页（` + "`" + `/batches/:id` + "`" + `）
 
 顶部筛选栏：
 
@@ -69,7 +71,7 @@ npm run dev
   - **复核历史**：时间线记录每次关闭/撤销操作
   - **原始 CSV 行**：留存原始 CSV 原文，作为不可篡改的证据
 
-### 3. 规则配置页（`/rules`）
+### 3. 规则配置页（` + "`" + `/rules` + "`" + `）
 
 支持版本管理、变更预演、启用审计和版本回退的完整安全链路：**预演 → 确认 → 审计 → 回退**
 
@@ -78,9 +80,9 @@ npm run dev
 - **规则版本 Tab**：查看所有历史版本，点击「预演并启用」进入变更预演流程
 - **预演记录 Tab**：查看最近的预演记录（应用重启后仍可查看）
 - **启用日志 Tab**：查看所有版本切换的审计日志（应用重启后仍可查看）
-  - `直接启用`(灰)：通过 API 或导入即生效直接切换
-  - `启用`(蓝)：通过预演确认后正常启用
-  - `回退`(黄)：通过回退包恢复到历史版本
+  - ` + "`" + `直接启用` + "`" + `(灰)：通过 API 或导入即生效直接切换
+  - ` + "`" + `启用` + "`" + `(蓝)：通过预演确认后正常启用
+  - ` + "`" + `回退` + "`" + `(黄)：通过回退包恢复到历史版本
 - **回退包 Tab**：管理可导出的回退包（应用重启后仍可使用）
   - 「导出」：下载回退包为 JSON 文件
   - 「导入回退包」：导入外部回退包文件
@@ -110,7 +112,7 @@ npm run dev
 - 温度安全范围（低于下限或高于上限即触发变质怀疑）
 - 规则描述
 
-### 4. 报表导出页（`/export`）
+### 4. 报表导出页（` + "`" + `/export` + "`" + `）
 
 - 勾选一个或多个批次
 - 三种导出：
@@ -128,26 +130,67 @@ npm run dev
 
 | 场景 | 处理方式 |
 |--------|----------|
-| 负数重量/无效数值 | 标记 `is_valid=false`，留存 `raw_line`，不参与规则判定，计入批次 error_records，不影响其他有效数据 |
+| 负数重量/无效数值 | 标记 ` + "`" + `is_valid=false` + "`" + `，留存 ` + "`" + `raw_line` + "`" + `，不参与规则判定，计入批次 error_records，不影响其他有效数据 |
 | 重复批次导入 | 返回 409，前端提示「该批次已存在」 |
-| 关闭后再撤销 | 写入 `review_history` 完整审计轨迹，批次未结计数同步增减 |
+| 关闭后再撤销 | 写入 ` + "`" + `review_history` + "`" + ` 完整审计轨迹，批次未结计数同步增减 |
 | 单条 CSV 行格式错误 | 逐行校验，单行失败不影响整体导入 |
 | 规则版本变更 | 历史异常证据不丢失，每条异常留存当时命中的规则版本 ID 和完整 evidence JSON |
 
 ## CSV 格式
 
-```csv
+` + "```" + `csv
 dish_name,planned_weight,actual_weight,temperature,timestamp
 红烧肉,500,620,52,2026-06-21T10:30:00.000Z
 清炒时蔬,300,-50,3,2026-06-21T10:31:00.000Z
-```
+` + "```" + `
 
-- `dish_name`：菜品名称
-- `planned_weight`：计划重量（g）
-- `actual_weight`：实际重量（g，<=0 视为无效）
-- `temperature`：温度（℃）
-- `timestamp`：ISO 时间戳
+- ` + "`" + `dish_name` + "`" + `：菜品名称
+- ` + "`" + `planned_weight` + "`" + `：计划重量（g）
+- ` + "`" + `actual_weight` + "`" + `：实际重量（g，<=0 视为无效）
+- ` + "`" + `temperature` + "`" + `：温度（℃）
+- ` + "`" + `timestamp` + "`" + `：ISO 时间戳
 
 ## 数据文件
 
-所有数据存储在项目根目录 `data/canteen.db`（SQLite WAL 模式）。删除该文件可重置全部数据。
+所有数据存储在项目根目录 ` + "`" + `data/canteen.db` + "`" + `（SQLite WAL 模式）。删除该文件可重置全部数据。
+`;
+
+fs.writeFileSync('README.md', content, 'utf8');
+console.log('Written', content.length, 'chars');
+console.log('File size after write:', fs.statSync('README.md').size);
+
+// Verify
+function toBytes(s) { return Buffer.from(s, 'utf8'); }
+function hasBytes(hay, needle) {
+  for (let i = 0; i <= hay.length - needle.length; i++) {
+    let m = true;
+    for (let j = 0; j < needle.length; j++) {
+      if (hay[i+j] !== needle[j]) { m = false; break; }
+    }
+    if (m) return true;
+  }
+  return false;
+}
+
+const b = fs.readFileSync('README.md');
+const tests = ['预演 → 确认 → 审计 → 回退', '预演并启用', '规则版本 Tab', '直接启用', '1. 预演', '预演已过期', '导入回退包', '应用回退', '导入后将第一条规则设为生效版本', '审计链路', '10 分钟', '重启后仍可'];
+console.log('\nVerification:');
+let allOk = true;
+for (const t of tests) {
+  const found = hasBytes(b, toBytes(t));
+  if (!found) allOk = false;
+  console.log('  ' + (found ? '[OK]' : '[FAIL]') + ' ' + t);
+}
+
+// Also check that old text is NOT present
+const oldText = '启用此版本';
+const hasOld = hasBytes(b, toBytes(oldText));
+if (hasOld) {
+  console.log('  [FAIL] Old text "' + oldText + '" should not be present');
+  allOk = false;
+} else {
+  console.log('  [OK] Old text "' + oldText + '" correctly absent');
+}
+
+console.log(allOk ? '\nAll verified!' : '\nSome failed!');
+process.exit(allOk ? 0 : 1);
