@@ -628,6 +628,183 @@ async function runTests() {
   });
 
   // ===============================================
+  // Test 11: 跨批次查询 + 组合筛选直接批量提交
+  // ===============================================
+  console.log('\n[T11] 跨批次查询 & 组合筛选直接批量提交');
+
+  await testCase('GET /anomalies 不传batch_id返回全部批次异常', async () => {
+    const resp = await httpGet(BACKEND_BASE + '/api/anomalies');
+    assertEq(resp.statusCode, 200, '状态码');
+    const allAnom = JSON.parse(resp.text);
+    assertTrue(allAnom.length >= unresolved.length, '全量异常>=单批次');
+  });
+
+  await testCase('预览跨批次（不设batch_ids）返回多批次分布', async () => {
+    const resp = await httpPost(BACKEND_BASE + '/api/anomalies/batch-preview', {
+      filter: { status: 'unresolved' },
+    });
+    assertEq(resp.statusCode, 200, '状态码');
+    const d = JSON.parse(resp.text);
+    assertTrue(d.matched_count >= unresolved.length, '跨批次未结异常更多或相等');
+    assertTrue(d.by_batch.length >= 1, '至少1个批次');
+  });
+
+  await testCase('按组合条件预览：类型+状态，计数精确', async () => {
+    const freshAnomResp = await httpGet(BACKEND_BASE + `/api/anomalies?batch_id=${testBatch.id}`);
+    const freshAnom = JSON.parse(freshAnomResp.text);
+    const resp = await httpPost(BACKEND_BASE + '/api/anomalies/batch-preview', {
+      filter: {
+        batch_ids: [testBatch.id],
+        status: 'unresolved',
+        anomaly_types: ['over_prep'],
+      },
+    });
+    const d = JSON.parse(resp.text);
+    const expectedCount = freshAnom.filter(
+      (a) => a.batch_id === testBatch.id && a.status === 'unresolved' && a.anomaly_type === 'over_prep'
+    ).length;
+    assertEq(d.matched_count, expectedCount, `over_prep未结计数精确: 期望${expectedCount}`);
+  });
+
+  let filterResolveOpId;
+  await testCase('按筛选直接批量判误报（by-filter），batch_operation_id可查', async () => {
+    const freshAnom = JSON.parse((await httpGet(BACKEND_BASE + `/api/anomalies?batch_id=${testBatch.id}&status=unresolved`)).text);
+    if (freshAnom.length === 0) {
+      console.log('    \x1b[33m[SKIP]\x1b[0m 当前批次无未结异常可按筛选批量判误报');
+      return;
+    }
+    const resp = await httpPost(BACKEND_BASE + '/api/anomalies/batch-resolve-by-filter', {
+      filter: {
+        batch_ids: [testBatch.id],
+        status: 'unresolved',
+      },
+      reason: '回归T11：按筛选直接批量判误报',
+      result: 'normal',
+    });
+    assertEq(resp.statusCode, 200, '状态码');
+    const d = JSON.parse(resp.text);
+    assertTrue(d.batch_operation_id, '有batch_operation_id');
+    filterResolveOpId = d.batch_operation_id;
+    assertEq(d.action, 'resolve');
+    assertEq(d.applied_result, 'normal');
+    assertTrue(d.success.length + d.skipped.length + d.failed.length === d.total_submitted, '分类合计=提交');
+    if (d.skipped.length > 0) {
+      d.skipped.forEach((s) => {
+        assertTrue(VALID_SKIP_CODES.has(s.skip_reason), `跳过原因${s.skip_reason}有效`);
+      });
+    }
+  });
+
+  await testCase('按筛选批量判误报后，batch_operations表可查操作详情', async () => {
+    if (!filterResolveOpId) {
+      console.log('    \x1b[33m[SKIP]\x1b[0m 无上一步操作ID');
+      return;
+    }
+    const resp = await httpGet(BACKEND_BASE + `/api/anomalies/batch-operation/${filterResolveOpId}`);
+    assertEq(resp.statusCode, 200, '状态码');
+    const d = JSON.parse(resp.text);
+    assertEq(d.operation.id, filterResolveOpId, 'ID匹配');
+    assertEq(d.operation.applied_result, 'normal', 'applied_result=normal');
+    assertTrue(d.operation.filter_snapshot, 'filter_snapshot非空');
+    assertTrue(Array.isArray(d.history), 'history数组');
+  });
+
+  await testCase('按筛选批量撤销关闭（by-filter）成功', async () => {
+    const resp = await httpPost(BACKEND_BASE + '/api/anomalies/batch-reopen-by-filter', {
+      filter: {
+        batch_ids: [testBatch.id],
+        status: 'resolved',
+      },
+      reason: '回归T11：按筛选批量撤销',
+    });
+    assertEq(resp.statusCode, 200, '状态码');
+    const d = JSON.parse(resp.text);
+    assertTrue(d.batch_operation_id, '有batch_operation_id');
+    assertEq(d.action, 'reopen');
+    if (d.success.length > 0) {
+      const checkResp = await httpGet(BACKEND_BASE + `/api/anomalies/${d.success[0].id}`);
+      const checkDetail = JSON.parse(checkResp.text);
+      assertEq(checkDetail.status, 'unresolved', '撤销后状态=unresolved');
+    }
+  });
+
+  await testCase('空结果筛选批量提交返回total_submitted=0', async () => {
+    const resp = await httpPost(BACKEND_BASE + '/api/anomalies/batch-resolve-by-filter', {
+      filter: {
+        batch_ids: ['batch_NONEXISTENT_xyz'],
+        status: 'unresolved',
+      },
+      reason: '空结果测试',
+      result: 'normal',
+    });
+    assertEq(resp.statusCode, 200, '状态码');
+    const d = JSON.parse(resp.text);
+    assertEq(d.total_submitted, 0, 'total_submitted=0');
+  });
+
+  await testCase('单条处理后再按筛选批量，已处理项不出现（被筛选排除）', async () => {
+    const freshAnom = JSON.parse((await httpGet(BACKEND_BASE + `/api/anomalies?batch_id=${testBatch.id}&status=unresolved`)).text);
+    if (freshAnom.length < 2) {
+      console.log('    \x1b[33m[SKIP]\x1b[0m 数据不足2条未结');
+      return;
+    }
+    const target = freshAnom[0];
+    await httpPost(BACKEND_BASE + `/api/anomalies/${target.id}/resolve`, {
+      reason: 'T11混用：先单条关',
+      result: 'confirmed',
+    });
+    const resp = await httpPost(BACKEND_BASE + '/api/anomalies/batch-resolve-by-filter', {
+      filter: {
+        batch_ids: [testBatch.id],
+        status: 'unresolved',
+      },
+      reason: 'T11混用：再按筛选批量',
+      result: 'normal',
+    });
+    const d = JSON.parse(resp.text);
+    const inSuccess = d.success.find((s) => s.id === target.id);
+    const inSkipped = d.skipped.find((s) => s.id === target.id);
+    assertTrue(!inSuccess, '已被单条关闭的不应出现在success中');
+    if (inSkipped) {
+      assertTrue(VALID_SKIP_CODES.has(inSkipped.skip_reason), `如果出现在skipped中，原因码有效`);
+    }
+  });
+
+  // ===============================================
+  // Test 12: 重启恢复验证（不实际重启，验证DB可查）
+  // ===============================================
+  console.log('\n[T12] 重启后恢复验证（DB数据完整性）');
+
+  await testCase('batch_operations表有足够记录（>=3）', async () => {
+    const resp = await httpGet(BACKEND_BASE + '/api/anomalies/batch-operations/list');
+    const list = JSON.parse(resp.text);
+    assertTrue(list.length >= 3, `批量操作记录>=3，实际=${list.length}`);
+  });
+
+  await testCase('每条batch_operation的filter_snapshot可解析或为空', async () => {
+    const resp = await httpGet(BACKEND_BASE + '/api/anomalies/batch-operations/list');
+    const list = JSON.parse(resp.text);
+    list.slice(0, 5).forEach((op) => {
+      if (!op.filter_snapshot) return;
+      const snap = typeof op.filter_snapshot === 'string' ? JSON.parse(op.filter_snapshot) : op.filter_snapshot;
+      assertTrue(typeof snap === 'object' && snap !== null, `filter_snapshot可解析: op=${op.id.slice(-8)}`);
+    });
+  });
+
+  await testCase('review_history中批量操作ID与batch_operations对应', async () => {
+    const resp = await httpGet(BACKEND_BASE + '/api/anomalies/batch-operations/list');
+    const list = JSON.parse(resp.text);
+    if (list.length === 0) throw new Error('无操作记录');
+    const op = list[0];
+    const detailResp = await httpGet(BACKEND_BASE + `/api/anomalies/batch-operation/${op.id}`);
+    const detail = JSON.parse(detailResp.text);
+    assertTrue(detail.history.length >= op.success_count, `历史记录数>=成功数`);
+    detail.history.forEach((h) => {
+      assertEq(h.batch_operation_id, op.id, '历史batch_operation_id匹配');
+    });
+  });
+
+  // ===============================================
   // 汇总
   // ===============================================
   console.log('\n============================================================');

@@ -54,6 +54,8 @@ export default function ReviewList() {
     clearAnomalySelection,
     batchResolveAnomalies,
     batchReopenAnomalies,
+    batchResolveByFilter,
+    batchReopenByFilter,
     batchPreviewAnomalies,
     clearBatchPreview,
     setBatchOperationResult,
@@ -75,6 +77,12 @@ export default function ReviewList() {
   const [showPreviewModal, setShowPreviewModal] = useState(false);
   const [showAdvancedFilter, setShowAdvancedFilter] = useState(false);
   const [previewLoading, setPreviewLoading] = useState(false);
+  const [sourceBatchFilter, setSourceBatchFilter] = useState<string>('current');
+  const [filterBatchResult, setFilterBatchResult] = useState<ManualResult>(null);
+  const [filterBatchReason, setFilterBatchReason] = useState('');
+  const [showFilterBatchModal, setShowFilterBatchModal] = useState(false);
+  const [filterBatchAction, setFilterBatchAction] = useState<'resolve' | 'reopen'>('resolve');
+  const [filterBatchSubmitting, setFilterBatchSubmitting] = useState(false);
 
   const [recordTimeStart, setRecordTimeStart] = useState('');
   const [recordTimeEnd, setRecordTimeEnd] = useState('');
@@ -98,7 +106,11 @@ export default function ReviewList() {
 
   const buildFilter = (): BatchFilterCriteria => {
     const f: BatchFilterCriteria = {};
-    if (id) f.batch_ids = [id];
+    if (sourceBatchFilter === 'current' && id) {
+      f.batch_ids = [id];
+    } else if (sourceBatchFilter !== 'current' && sourceBatchFilter !== 'all') {
+      f.batch_ids = [sourceBatchFilter];
+    }
     if (statusFilter !== 'all') f.status = statusFilter;
     if (typeFilter !== 'all') f.anomaly_types = [typeFilter as AnomalyType];
     if (recordTimeStart) f.time_start = recordTimeStart;
@@ -125,9 +137,10 @@ export default function ReviewList() {
   };
 
   const refreshAllAfterBatch = async () => {
+    const fetchBatchId = sourceBatchFilter === 'current' ? id : sourceBatchFilter === 'all' ? undefined : sourceBatchFilter;
     await Promise.all([
       fetchAnomalies(
-        id,
+        fetchBatchId,
         statusFilter === 'all' ? undefined : statusFilter,
         typeFilter === 'all' ? undefined : typeFilter
       ),
@@ -187,21 +200,55 @@ export default function ReviewList() {
     setShowPreviewModal(true);
   };
 
+  const openFilterBatchResolve = (result: ManualResult) => {
+    setFilterBatchResult(result);
+    setFilterBatchAction('resolve');
+    setFilterBatchReason('');
+    setShowFilterBatchModal(true);
+  };
+
+  const openFilterBatchReopen = () => {
+    setFilterBatchAction('reopen');
+    setFilterBatchReason('');
+    setShowFilterBatchModal(true);
+  };
+
+  const handleFilterBatchSubmit = async () => {
+    if (filterBatchAction === 'resolve' && (!filterBatchResult || !filterBatchReason.trim())) return;
+    setFilterBatchSubmitting(true);
+    const filter = buildFilter();
+    let r;
+    if (filterBatchAction === 'resolve') {
+      r = await batchResolveByFilter(filter, filterBatchReason.trim(), filterBatchResult!);
+    } else {
+      r = await batchReopenByFilter(filter, filterBatchReason.trim() || undefined);
+    }
+    setFilterBatchSubmitting(false);
+    if (r.result) {
+      setShowFilterBatchModal(false);
+      setShowPreviewModal(false);
+      clearBatchPreview();
+      setShowBatchResult(true);
+      await refreshAllAfterBatch();
+    }
+  };
+
   useEffect(() => {
     fetchBatches();
     fetchBatchOperations();
   }, [fetchBatches, fetchBatchOperations]);
 
   useEffect(() => {
-    if (id) {
-      selectBatch(id);
+    const fetchBatchId = sourceBatchFilter === 'current' ? id : sourceBatchFilter === 'all' ? undefined : sourceBatchFilter;
+    if (id || sourceBatchFilter !== 'current') {
+      selectBatch(fetchBatchId || null);
       fetchAnomalies(
-        id,
+        fetchBatchId,
         statusFilter === 'all' ? undefined : statusFilter,
         typeFilter === 'all' ? undefined : typeFilter
       );
     }
-  }, [id, statusFilter, typeFilter, selectBatch, fetchAnomalies]);
+  }, [id, statusFilter, typeFilter, sourceBatchFilter, selectBatch, fetchAnomalies]);
 
   useEffect(() => {
     if (anomalyDetail) {
@@ -262,6 +309,13 @@ export default function ReviewList() {
 
   const currentDetail = anomalyDetail;
   const hasAdvancedFilters = !!recordTimeStart || !!recordTimeEnd || !!createdTimeStart || !!createdTimeEnd || !!dishKeyword.trim();
+  const activeBatchName = sourceBatchFilter === 'current'
+    ? (batch?.name || '异常复核')
+    : sourceBatchFilter === 'all'
+    ? '全部批次'
+    : (batches.find((b) => b.id === sourceBatchFilter)?.name || '异常复核');
+  const totalAnomalyCount = anomalies.length;
+  const totalUnresolvedCount = anomalies.filter((a) => a.status === 'unresolved').length;
 
   return (
     <div className="space-y-4">
@@ -276,9 +330,9 @@ export default function ReviewList() {
           </Link>
           <div className="h-4 w-px bg-slate-300" />
           <div>
-            <h2 className="text-lg font-bold text-slate-800">{batch?.name || '异常复核'}</h2>
+            <h2 className="text-lg font-bold text-slate-800">{activeBatchName}</h2>
             <p className="text-xs text-slate-500">
-              共 {batch?.anomaly_count ?? 0} 条异常，未结 {batch?.unresolved_count ?? 0} 条
+              共 {totalAnomalyCount} 条异常，未结 {totalUnresolvedCount} 条
             </p>
           </div>
         </div>
@@ -287,6 +341,17 @@ export default function ReviewList() {
       <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-3">
         <div className="flex items-center gap-3 flex-wrap">
           <Filter className="w-4 h-4 text-slate-500" />
+          <select
+            value={sourceBatchFilter}
+            onChange={(e) => setSourceBatchFilter(e.target.value)}
+            className="px-2 py-1.5 text-xs border border-slate-200 rounded bg-white focus:outline-none focus:ring-2 focus:ring-primary-500 max-w-[180px]"
+          >
+            <option value="current">{batch?.name ? `当前: ${batch.name}` : '当前批次'}</option>
+            <option value="all">全部批次</option>
+            {batches.filter((b) => b.id !== id).map((b) => (
+              <option key={b.id} value={b.id}>{b.name}</option>
+            ))}
+          </select>
           <div className="flex items-center gap-1 bg-slate-100 rounded p-0.5">
             {(['all', 'unresolved', 'resolved'] as const).map((s) => (
               <button
@@ -1051,7 +1116,39 @@ export default function ReviewList() {
                 </div>
               )}
             </div>
-            <div className="px-5 py-3 border-t border-slate-200 flex justify-end gap-2">
+            <div className="px-5 py-3 border-t border-slate-200 flex items-center justify-between gap-2 flex-wrap">
+              <div className="flex items-center gap-2 flex-wrap">
+                {batchPreview.estimated_unresolved_actionable > 0 && (
+                  <>
+                    <button
+                      onClick={() => openFilterBatchResolve('normal')}
+                      className="px-3 py-1.5 bg-emerald-600 text-white rounded text-xs hover:bg-emerald-700 inline-flex items-center gap-1"
+                    >
+                      <CheckCircle className="w-3.5 h-3.5" />
+                      批量判误报（{batchPreview.estimated_unresolved_actionable}条）
+                    </button>
+                    <button
+                      onClick={() => openFilterBatchResolve('confirmed')}
+                      className="px-3 py-1.5 bg-red-600 text-white rounded text-xs hover:bg-red-700 inline-flex items-center gap-1"
+                    >
+                      <XCircle className="w-3.5 h-3.5" />
+                      批量确认异常（{batchPreview.estimated_unresolved_actionable}条）
+                    </button>
+                  </>
+                )}
+                {batchPreview.estimated_resolved_actionable > 0 && (
+                  <button
+                    onClick={openFilterBatchReopen}
+                    className="px-3 py-1.5 bg-amber-500 text-white rounded text-xs hover:bg-amber-600 inline-flex items-center gap-1"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    批量撤销关闭（{batchPreview.estimated_resolved_actionable}条）
+                  </button>
+                )}
+                {batchPreview.estimated_unresolved_actionable === 0 && batchPreview.estimated_resolved_actionable === 0 && (
+                  <span className="text-xs text-slate-500">当前筛选无可用操作</span>
+                )}
+              </div>
               <button
                 onClick={() => {
                   setShowPreviewModal(false);
@@ -1327,6 +1424,74 @@ export default function ReviewList() {
           </div>
         </div>
       )}
+      {showFilterBatchModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-xl max-w-md w-full">
+            <div className="px-5 py-4 border-b border-slate-200 flex items-center justify-between">
+              <h3 className="font-semibold text-slate-800">
+                {filterBatchAction === 'resolve'
+                  ? (filterBatchResult === 'normal' ? '按筛选批量判误报' : '按筛选批量确认异常')
+                  : '按筛选批量撤销关闭'}
+              </h3>
+              <button
+                onClick={() => setShowFilterBatchModal(false)}
+                className="text-slate-400 hover:text-slate-600"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="p-5 space-y-4">
+              <div className="bg-slate-50 rounded p-3 text-sm text-slate-600">
+                <div className="flex items-center gap-2">
+                  <Info className="w-4 h-4 text-primary-600" />
+                  {filterBatchAction === 'resolve' ? (
+                    <>即将按筛选条件批量处理 <strong>{batchPreview?.estimated_unresolved_actionable ?? 0}</strong> 条未结异常</>
+                  ) : (
+                    <>即将按筛选条件批量恢复 <strong>{batchPreview?.estimated_resolved_actionable ?? 0}</strong> 条已关闭异常</>
+                  )}
+                </div>
+                <div className="text-xs text-slate-500 mt-1">
+                  提交后系统会逐条检查状态，已被处理或状态变更的记录将被自动跳过并注明原因
+                </div>
+              </div>
+              <div>
+                <label className="text-sm text-slate-600">
+                  {filterBatchAction === 'resolve' ? '复核原因（必填）' : '撤销原因（可选）'}
+                </label>
+                <textarea
+                  value={filterBatchReason}
+                  onChange={(e) => setFilterBatchReason(e.target.value)}
+                  rows={4}
+                  placeholder={filterBatchAction === 'resolve' ? '请填写统一的复核原因' : '请填写撤销原因（可选）'}
+                  className="w-full mt-1 px-3 py-2 border border-slate-200 rounded text-sm resize-none focus:outline-none focus:ring-2 focus:ring-primary-500"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => setShowFilterBatchModal(false)}
+                  className="flex-1 py-2 bg-slate-100 text-slate-700 rounded text-sm hover:bg-slate-200"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={handleFilterBatchSubmit}
+                  disabled={filterBatchSubmitting || (filterBatchAction === 'resolve' && !filterBatchReason.trim())}
+                  className={`flex-1 py-2 text-white rounded text-sm disabled:opacity-50 disabled:cursor-not-allowed ${
+                    filterBatchAction === 'resolve'
+                      ? filterBatchResult === 'normal'
+                        ? 'bg-emerald-600 hover:bg-emerald-700'
+                        : 'bg-red-600 hover:bg-red-700'
+                      : 'bg-amber-600 hover:bg-amber-700'
+                  }`}
+                >
+                  {filterBatchSubmitting ? '提交中...' : '确认批量提交'}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
     </div>
   );
 }

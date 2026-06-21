@@ -73,7 +73,7 @@ interface AppState {
   importSample: () => Promise<{ error?: string }>;
   importCsv: (file: File, name?: string, date?: string) => Promise<{ error?: string }>;
   selectBatch: (id: string | null) => void;
-  fetchAnomalies: (batchId: string, status?: AnomalyStatus, type?: string) => Promise<void>;
+  fetchAnomalies: (batchId?: string, status?: AnomalyStatus, type?: string) => Promise<void>;
   fetchAnomalyDetail: (id: string) => Promise<void>;
   resolveAnomaly: (id: string, reason: string, result: ManualResult, anomaly_type?: AnomalyType) => Promise<{ error?: string }>;
   reopenAnomaly: (id: string, reason?: string) => Promise<{ error?: string }>;
@@ -184,7 +184,8 @@ export const useAppStore = create<AppState>((set, get) => ({
   selectBatch: (id) => set({ selectedBatchId: id }),
 
   fetchAnomalies: async (batchId, status, type) => {
-    const q = new URLSearchParams({ batch_id: batchId });
+    const q = new URLSearchParams();
+    if (batchId) q.set('batch_id', batchId);
     if (status) q.set('status', status);
     if (type) q.set('type', type);
     const r = await api(`/anomalies?${q.toString()}`);
