@@ -106,12 +106,43 @@ router.get('/consistency', (_req: Request, res: Response) => {
   const resolvedNoReason = db.prepare("SELECT COUNT(*) as cnt FROM anomalies WHERE status = 'resolved' AND (manual_reason IS NULL OR manual_result IS NULL)").get() as { cnt: number };
   if (resolvedNoReason.cnt > 0) issues.push(`存在 ${resolvedNoReason.cnt} 条已关异常缺失判定信息`);
 
+  const resolvedNoTimestamp = db.prepare("SELECT COUNT(*) as cnt FROM anomalies WHERE status = 'resolved' AND resolved_at IS NULL").get() as { cnt: number };
+  if (resolvedNoTimestamp.cnt > 0) issues.push(`存在 ${resolvedNoTimestamp.cnt} 条已关异常缺失关闭时间`);
+
+  const historyNoAnomaly = db.prepare(`
+    SELECT COUNT(*) as cnt FROM review_history h
+    LEFT JOIN anomalies a ON h.anomaly_id = a.id
+    WHERE a.id IS NULL
+  `).get() as { cnt: number };
+  if (historyNoAnomaly.cnt > 0) issues.push(`存在 ${historyNoAnomaly.cnt} 条复核历史关联的异常不存在`);
+
+  const resolvedNoHistory = db.prepare(`
+    SELECT COUNT(*) as cnt FROM anomalies a
+    WHERE a.status = 'resolved'
+    AND NOT EXISTS (
+      SELECT 1 FROM review_history h
+      WHERE h.anomaly_id = a.id AND h.action = 'resolve'
+    )
+  `).get() as { cnt: number };
+  if (resolvedNoHistory.cnt > 0) issues.push(`存在 ${resolvedNoHistory.cnt} 条已关闭异常没有对应的关闭历史记录`);
+
+  const batchOpHistoryMismatch = db.prepare(`
+    SELECT COUNT(*) as cnt FROM review_history
+    WHERE batch_operation_id IS NOT NULL
+    AND batch_operation_id != ''
+    AND action NOT IN ('resolve', 'reopen')
+  `).get() as { cnt: number };
+  if (batchOpHistoryMismatch.cnt > 0) issues.push(`存在 ${batchOpHistoryMismatch.cnt} 条批量操作历史的动作类型异常`);
+
   res.json({
     ok: issues.length === 0,
     issues,
     stats: {
       batch_count: batches.length,
       active_rules: activeRules.cnt,
+      anomaly_count: (db.prepare('SELECT COUNT(*) as cnt FROM anomalies').get() as { cnt: number })?.cnt || 0,
+      history_count: (db.prepare('SELECT COUNT(*) as cnt FROM review_history').get() as { cnt: number })?.cnt || 0,
+      batch_operation_count: (db.prepare('SELECT COUNT(DISTINCT batch_operation_id) as cnt FROM review_history WHERE batch_operation_id IS NOT NULL').get() as { cnt: number })?.cnt || 0,
     },
   });
 });

@@ -15,6 +15,40 @@ import type {
 
 const router = Router();
 
+function logInfo(msg: string, data?: Record<string, unknown>) {
+  const timestamp = new Date().toISOString();
+  const prefix = `[${timestamp}] [ANOMALIES] [INFO]`;
+  if (data) {
+    console.log(prefix, msg, JSON.stringify(data));
+  } else {
+    console.log(prefix, msg);
+  }
+}
+
+function logWarn(msg: string, data?: Record<string, unknown>) {
+  const timestamp = new Date().toISOString();
+  const prefix = `[${timestamp}] [ANOMALIES] [WARN]`;
+  if (data) {
+    console.warn(prefix, msg, JSON.stringify(data));
+  } else {
+    console.warn(prefix, msg);
+  }
+}
+
+function logError(msg: string, err?: Error, data?: Record<string, unknown>) {
+  const timestamp = new Date().toISOString();
+  const prefix = `[${timestamp}] [ANOMALIES] [ERROR]`;
+  if (err && data) {
+    console.error(prefix, msg, err.message, JSON.stringify(data));
+  } else if (err) {
+    console.error(prefix, msg, err.message);
+  } else if (data) {
+    console.error(prefix, msg, JSON.stringify(data));
+  } else {
+    console.error(prefix, msg);
+  }
+}
+
 router.get('/', (req: Request, res: Response) => {
   const batchId = req.query.batch_id as string | undefined;
   const status = req.query.status as AnomalyStatus | undefined;
@@ -59,41 +93,66 @@ router.get('/:id', (req: Request, res: Response) => {
 
 router.post('/:id/resolve', (req: Request, res: Response) => {
   const { reason, result, anomaly_type } = req.body as { reason: string; result: ManualResult; anomaly_type?: AnomalyType };
-  if (!reason || !result) return res.status(400).json({ error: '原因和判定结果必填' });
+  const anomalyId = req.params.id;
+
+  logInfo('Resolve anomaly request received', { anomalyId, result, hasReason: !!reason, hasTypeOverride: !!anomaly_type });
+
+  if (!reason || !result) {
+    logWarn('Resolve failed: missing reason or result', { anomalyId });
+    return res.status(400).json({ error: '原因和判定结果必填' });
+  }
   if (anomaly_type && !['over_prep', 'spoilage_suspect'].includes(anomaly_type)) {
+    logWarn('Resolve failed: invalid anomaly type', { anomalyId, anomaly_type });
     return res.status(400).json({ error: '异常类型无效' });
   }
 
-  const anomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(req.params.id) as Anomaly;
-  if (!anomaly) return res.status(404).json({ error: '异常不存在' });
-  if (anomaly.status === 'resolved') return res.status(400).json({ error: '该异常已关闭' });
+  const anomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(anomalyId) as Anomaly;
+  if (!anomaly) {
+    logWarn('Resolve failed: anomaly not found', { anomalyId });
+    return res.status(404).json({ error: '异常不存在' });
+  }
+  if (anomaly.status === 'resolved') {
+    logWarn('Resolve skipped: anomaly already resolved', { anomalyId });
+    return res.status(400).json({ error: '该异常已关闭' });
+  }
 
   const now = new Date().toISOString();
   const typeChanged = anomaly_type && anomaly_type !== anomaly.anomaly_type;
   const finalType = anomaly_type || anomaly.anomaly_type;
 
-  const tx = db.transaction(() => {
-    db.prepare(`
-      UPDATE anomalies SET status = 'resolved', manual_reason = ?, manual_result = ?, resolved_at = ?, anomaly_type = ? WHERE id = ?
-    `).run(reason, result, now, finalType, req.params.id);
+  try {
+    const tx = db.transaction(() => {
+      db.prepare(`
+        UPDATE anomalies SET status = 'resolved', manual_reason = ?, manual_result = ?, resolved_at = ?, anomaly_type = ? WHERE id = ?
+      `).run(reason, result, now, finalType, anomalyId);
 
-    db.prepare(`
-      UPDATE batches SET unresolved_count = unresolved_count - 1 WHERE id = ?
-    `).run(anomaly.batch_id);
+      db.prepare(`
+        UPDATE batches SET unresolved_count = unresolved_count - 1 WHERE id = ?
+      `).run(anomaly.batch_id);
 
-    const histReason = typeChanged
-      ? `${reason}（人工改判类型：${anomaly.anomaly_type} → ${anomaly_type}）`
-      : reason;
-    const historyId = genId('hist');
-    db.prepare(`
-      INSERT INTO review_history (id, anomaly_id, action, reason, result, operator, timestamp, batch_operation_id)
-      VALUES (?, ?, 'resolve', ?, ?, 'admin', ?, NULL)
-    `).run(historyId, req.params.id, histReason, result, now);
-  });
-  tx();
+      const histReason = typeChanged
+        ? `${reason}（人工改判类型：${anomaly.anomaly_type} → ${anomaly_type}）`
+        : reason;
+      const historyId = genId('hist');
+      db.prepare(`
+        INSERT INTO review_history (id, anomaly_id, action, reason, result, operator, timestamp, batch_operation_id)
+        VALUES (?, ?, 'resolve', ?, ?, 'admin', ?, NULL)
+      `).run(historyId, anomalyId, histReason, result, now);
+    });
+    tx();
 
-  const updated = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(req.params.id) as Anomaly;
-  res.json(updated);
+    const updated = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(anomalyId) as Anomaly;
+    logInfo('Anomaly resolved successfully', {
+      anomalyId,
+      result,
+      batchId: anomaly.batch_id,
+      typeChanged: !!typeChanged,
+    });
+    res.json(updated);
+  } catch (err) {
+    logError('Resolve failed: database error', err as Error, { anomalyId });
+    res.status(500).json({ error: '关闭异常失败，请稍后重试' });
+  }
 });
 
 router.post('/batch-resolve', (req: Request, res: Response) => {
@@ -104,13 +163,23 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
     anomaly_type?: AnomalyType;
   };
 
+  logInfo('Batch resolve request received', {
+    count: anomaly_ids?.length || 0,
+    result,
+    hasReason: !!reason,
+    hasTypeOverride: !!anomaly_type,
+  });
+
   if (!anomaly_ids || !Array.isArray(anomaly_ids) || anomaly_ids.length === 0) {
+    logWarn('Batch resolve failed: empty anomaly ids');
     return res.status(400).json({ error: '请选择要处理的异常' });
   }
   if (!reason || !result) {
+    logWarn('Batch resolve failed: missing reason or result');
     return res.status(400).json({ error: '原因和判定结果必填' });
   }
   if (anomaly_type && !['over_prep', 'spoilage_suspect'].includes(anomaly_type)) {
+    logWarn('Batch resolve failed: invalid anomaly type', { anomaly_type });
     return res.status(400).json({ error: '异常类型无效' });
   }
 
@@ -120,14 +189,22 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
   const skipped: BatchOperationResultItem[] = [];
   const failed: BatchOperationResultItem[] = [];
 
+  logInfo('Batch resolve starting', {
+    batchOperationId,
+    totalCount: anomaly_ids.length,
+    result,
+  });
+
   for (const id of anomaly_ids) {
     try {
       const anomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(id) as Anomaly;
       if (!anomaly) {
+        logWarn('Batch resolve skipped: anomaly not found', { batchOperationId, anomalyId: id });
         skipped.push({ id, success: false, error: '异常不存在' });
         continue;
       }
       if (anomaly.status === 'resolved') {
+        logWarn('Batch resolve skipped: already resolved', { batchOperationId, anomalyId: id });
         skipped.push({ id, success: false, error: '该异常已关闭' });
         continue;
       }
@@ -157,6 +234,7 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
 
       success.push({ id, success: true });
     } catch (err) {
+      logError('Batch resolve failed for item', err as Error, { batchOperationId, anomalyId: id });
       failed.push({ id, success: false, error: (err as Error).message });
     }
   }
@@ -167,36 +245,62 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
     skipped,
     failed,
   };
+
+  logInfo('Batch resolve completed', {
+    batchOperationId,
+    totalCount: anomaly_ids.length,
+    successCount: success.length,
+    skippedCount: skipped.length,
+    failedCount: failed.length,
+    result,
+  });
+
   res.json(response);
 });
 
 router.post('/:id/reopen', (req: Request, res: Response) => {
   const { reason } = req.body as { reason?: string };
+  const anomalyId = req.params.id;
 
-  const anomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(req.params.id) as Anomaly;
-  if (!anomaly) return res.status(404).json({ error: '异常不存在' });
-  if (anomaly.status === 'unresolved') return res.status(400).json({ error: '该异常尚未关闭' });
+  logInfo('Reopen anomaly request received', { anomalyId, hasReason: !!reason });
+
+  const anomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(anomalyId) as Anomaly;
+  if (!anomaly) {
+    logWarn('Reopen failed: anomaly not found', { anomalyId });
+    return res.status(404).json({ error: '异常不存在' });
+  }
+  if (anomaly.status === 'unresolved') {
+    logWarn('Reopen skipped: already unresolved', { anomalyId });
+    return res.status(400).json({ error: '该异常尚未关闭' });
+  }
 
   const now = new Date().toISOString();
-  const tx = db.transaction(() => {
-    db.prepare(`
-      UPDATE anomalies SET status = 'unresolved', manual_reason = NULL, manual_result = NULL, resolved_at = NULL WHERE id = ?
-    `).run(req.params.id);
 
-    db.prepare(`
-      UPDATE batches SET unresolved_count = unresolved_count + 1 WHERE id = ?
-    `).run(anomaly.batch_id);
+  try {
+    const tx = db.transaction(() => {
+      db.prepare(`
+        UPDATE anomalies SET status = 'unresolved', manual_reason = NULL, manual_result = NULL, resolved_at = NULL WHERE id = ?
+      `).run(anomalyId);
 
-    const historyId = genId('hist');
-    db.prepare(`
-      INSERT INTO review_history (id, anomaly_id, action, reason, result, operator, timestamp, batch_operation_id)
-      VALUES (?, ?, 'reopen', ?, NULL, 'admin', ?, NULL)
-    `).run(historyId, req.params.id, reason || '撤销关闭', now);
-  });
-  tx();
+      db.prepare(`
+        UPDATE batches SET unresolved_count = unresolved_count + 1 WHERE id = ?
+      `).run(anomaly.batch_id);
 
-  const updated = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(req.params.id) as Anomaly;
-  res.json(updated);
+      const historyId = genId('hist');
+      db.prepare(`
+        INSERT INTO review_history (id, anomaly_id, action, reason, result, operator, timestamp, batch_operation_id)
+        VALUES (?, ?, 'reopen', ?, NULL, 'admin', ?, NULL)
+      `).run(historyId, anomalyId, reason || '撤销关闭', now);
+    });
+    tx();
+
+    const updated = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(anomalyId) as Anomaly;
+    logInfo('Anomaly reopened successfully', { anomalyId, batchId: anomaly.batch_id });
+    res.json(updated);
+  } catch (err) {
+    logError('Reopen failed: database error', err as Error, { anomalyId });
+    res.status(500).json({ error: '撤销关闭失败，请稍后重试' });
+  }
 });
 
 router.post('/batch-reopen', (req: Request, res: Response) => {
@@ -205,7 +309,13 @@ router.post('/batch-reopen', (req: Request, res: Response) => {
     reason?: string;
   };
 
+  logInfo('Batch reopen request received', {
+    count: anomaly_ids?.length || 0,
+    hasReason: !!reason,
+  });
+
   if (!anomaly_ids || !Array.isArray(anomaly_ids) || anomaly_ids.length === 0) {
+    logWarn('Batch reopen failed: empty anomaly ids');
     return res.status(400).json({ error: '请选择要恢复的异常' });
   }
 
@@ -215,14 +325,21 @@ router.post('/batch-reopen', (req: Request, res: Response) => {
   const skipped: BatchOperationResultItem[] = [];
   const failed: BatchOperationResultItem[] = [];
 
+  logInfo('Batch reopen starting', {
+    batchOperationId,
+    totalCount: anomaly_ids.length,
+  });
+
   for (const id of anomaly_ids) {
     try {
       const anomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(id) as Anomaly;
       if (!anomaly) {
+        logWarn('Batch reopen skipped: anomaly not found', { batchOperationId, anomalyId: id });
         skipped.push({ id, success: false, error: '异常不存在' });
         continue;
       }
       if (anomaly.status === 'unresolved') {
+        logWarn('Batch reopen skipped: already unresolved', { batchOperationId, anomalyId: id });
         skipped.push({ id, success: false, error: '该异常尚未关闭' });
         continue;
       }
@@ -246,6 +363,7 @@ router.post('/batch-reopen', (req: Request, res: Response) => {
 
       success.push({ id, success: true });
     } catch (err) {
+      logError('Batch reopen failed for item', err as Error, { batchOperationId, anomalyId: id });
       failed.push({ id, success: false, error: (err as Error).message });
     }
   }
@@ -256,6 +374,15 @@ router.post('/batch-reopen', (req: Request, res: Response) => {
     skipped,
     failed,
   };
+
+  logInfo('Batch reopen completed', {
+    batchOperationId,
+    totalCount: anomaly_ids.length,
+    successCount: success.length,
+    skippedCount: skipped.length,
+    failedCount: failed.length,
+  });
+
   res.json(response);
 });
 
