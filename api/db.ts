@@ -159,6 +159,27 @@ export function initDatabase(): void {
     );
     CREATE INDEX IF NOT EXISTS idx_batch_ops_timestamp ON batch_operations(timestamp);
     CREATE INDEX IF NOT EXISTS idx_batch_ops_action ON batch_operations(action);
+
+    CREATE TABLE IF NOT EXISTS batch_result_items (
+      id TEXT PRIMARY KEY,
+      batch_operation_id TEXT NOT NULL,
+      anomaly_id TEXT NOT NULL,
+      dish_name TEXT,
+      status_before TEXT,
+      result_before TEXT,
+      outcome TEXT NOT NULL,
+      skip_reason TEXT,
+      error_message TEXT,
+      FOREIGN KEY (batch_operation_id) REFERENCES batch_operations(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_bri_batch_op ON batch_result_items(batch_operation_id);
+    CREATE INDEX IF NOT EXISTS idx_bri_outcome ON batch_result_items(outcome);
+
+    CREATE TABLE IF NOT EXISTS result_center_config (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
   `);
 
   const columns = db.prepare('PRAGMA table_info(review_history)').all() as { name: string }[];
@@ -167,6 +188,13 @@ export function initDatabase(): void {
     db.exec(`ALTER TABLE review_history ADD COLUMN batch_operation_id TEXT;`);
   }
   db.exec(`CREATE INDEX IF NOT EXISTS idx_history_batch_operation ON review_history(batch_operation_id);`);
+
+  const batchOpsColumns = db.prepare('PRAGMA table_info(batch_operations)').all() as { name: string }[];
+  const hasIdempotencyKey = batchOpsColumns.some(c => c.name === 'idempotency_key');
+  if (!hasIdempotencyKey) {
+    db.exec(`ALTER TABLE batch_operations ADD COLUMN idempotency_key TEXT;`);
+  }
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_batch_ops_idemkey ON batch_operations(idempotency_key);`);
 
   const ruleCount = db.prepare('SELECT COUNT(*) as cnt FROM rules').get() as { cnt: number };
   if (ruleCount.cnt === 0) {

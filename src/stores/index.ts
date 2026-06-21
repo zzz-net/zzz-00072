@@ -6,11 +6,14 @@ import type {
   AnomalyType,
   Batch,
   BatchFilterCriteria,
+  BatchOperationDetail,
   BatchOperationRecord,
   BatchOperationResponse,
   BatchPreviewResponse,
+  BatchResultItem,
   ManualResult,
   OperationLog,
+  ResultCenterConfig,
   ReviewHistory,
   Rule,
   RulePreviewDetail,
@@ -94,6 +97,14 @@ interface AppState {
   setBatchOperationResult: (r: BatchOperationResponse | null) => void;
   fetchOperationLogs: (limit?: number) => Promise<void>;
   exportFilteredDetail: (filter: BatchFilterCriteria) => Promise<void>;
+  resultCenterList: BatchOperationRecord[];
+  resultCenterDetail: BatchOperationDetail | null;
+  resultCenterConfig: ResultCenterConfig | null;
+  fetchResultCenterList: (params?: { action?: string; outcome?: string; time_start?: string; time_end?: string }) => Promise<void>;
+  fetchResultCenterDetail: (id: string) => Promise<void>;
+  exportResultCenterItem: (id: string) => Promise<void>;
+  loadResultCenterConfig: () => Promise<void>;
+  saveResultCenterConfig: (config: ResultCenterConfig) => Promise<void>;
   createRule: (r: Omit<Rule, 'id' | 'created_at' | 'is_active'>) => Promise<{ error?: string; issues?: ValidationIssue[] }>;
   activateRule: (id: string) => Promise<void>;
   checkConsistency: () => Promise<void>;
@@ -140,6 +151,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   rollbackPackages: [],
   currentPreview: null,
   toast: null,
+  resultCenterList: [],
+  resultCenterDetail: null,
+  resultCenterConfig: null,
 
   setToast: (t) => {
     set({ toast: t });
@@ -481,6 +495,71 @@ export const useAppStore = create<AppState>((set, get) => ({
     } catch {
       get().setToast({ msg: '导出失败', type: 'error' });
     }
+  },
+
+  fetchResultCenterList: async (params) => {
+    const q = new URLSearchParams();
+    if (params?.action && params.action !== 'all') q.set('action', params.action);
+    if (params?.outcome && params.outcome !== 'all') q.set('outcome', params.outcome);
+    if (params?.time_start) q.set('time_start', params.time_start);
+    if (params?.time_end) q.set('time_end', params.time_end);
+    const r = await api(`/result-center/list?${q.toString()}`);
+    if (r.ok) {
+      const data = await r.json();
+      set({ resultCenterList: data as BatchOperationRecord[] });
+    }
+  },
+
+  fetchResultCenterDetail: async (id) => {
+    const r = await api(`/result-center/detail/${id}`);
+    if (r.ok) {
+      const data = await r.json();
+      set({ resultCenterDetail: data as BatchOperationDetail });
+    }
+  },
+
+  exportResultCenterItem: async (id) => {
+    try {
+      const r = await fetch(`/api/result-center/export/${id}`);
+      if (!r.ok) {
+        get().setToast({ msg: '导出失败', type: 'error' });
+        return;
+      }
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const cd = r.headers.get('Content-Disposition');
+      let filename = `batch-result-${new Date().toISOString().slice(0, 10)}.csv`;
+      if (cd) {
+        const match = cd.match(/filename\*?=(?:UTF-8'')?["']?([^;"'\n]+)/i);
+        if (match) filename = decodeURIComponent(match[1]);
+      }
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      get().setToast({ msg: '批量操作结果已导出', type: 'success' });
+    } catch {
+      get().setToast({ msg: '导出失败', type: 'error' });
+    }
+  },
+
+  loadResultCenterConfig: async () => {
+    const r = await api('/result-center/config');
+    if (r.ok) {
+      const data = await r.json();
+      if (data) set({ resultCenterConfig: data as ResultCenterConfig });
+    }
+  },
+
+  saveResultCenterConfig: async (config) => {
+    await api('/result-center/config', {
+      method: 'POST',
+      body: JSON.stringify(config),
+    });
+    set({ resultCenterConfig: config });
   },
 
   createRule: async (r) => {

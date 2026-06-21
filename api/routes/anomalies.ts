@@ -11,6 +11,7 @@ import type {
   BatchOperationResultItem,
   BatchPreviewAnomaly,
   BatchPreviewResponse,
+  BatchResultItem,
   ManualResult,
   OperationLog,
   ReviewHistory,
@@ -204,14 +205,15 @@ function insertBatchOperationRecord(
   successCount: number,
   skippedCount: number,
   failedCount: number,
-  timestamp: string
+  timestamp: string,
+  idempotencyKey?: string
 ): void {
   db.prepare(`
     INSERT INTO batch_operations (
       id, action, applied_result, applied_reason, applied_anomaly_type,
       filter_snapshot, total_submitted, success_count, skipped_count,
-      failed_count, operator, timestamp
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin', ?)
+      failed_count, operator, timestamp, idempotency_key
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'admin', ?, ?)
   `).run(
     id,
     action,
@@ -223,8 +225,35 @@ function insertBatchOperationRecord(
     successCount,
     skippedCount,
     failedCount,
-    timestamp
+    timestamp,
+    idempotencyKey || null
   );
+}
+
+interface PendingResultItem {
+  anomalyId: string;
+  dishName: string | null;
+  statusBefore: AnomalyStatus | null;
+  resultBefore: ManualResult;
+  outcome: 'success' | 'skipped' | 'failed';
+  skipReason: SkipReasonCode | null;
+  errorMessage: string | null;
+}
+
+function persistResultItems(batchOperationId: string, items: PendingResultItem[]): void {
+  const stmt = db.prepare(`
+    INSERT INTO batch_result_items (id, batch_operation_id, anomaly_id, dish_name, status_before, result_before, outcome, skip_reason, error_message)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+  for (const item of items) {
+    stmt.run(genId('bri'), batchOperationId, item.anomalyId, item.dishName, item.statusBefore, item.resultBefore, item.outcome, item.skipReason, item.errorMessage);
+  }
+}
+
+function checkIdempotencyKey(idempotencyKey: string | undefined): BatchOperationRecord | null {
+  if (!idempotencyKey) return null;
+  const existing = db.prepare('SELECT * FROM batch_operations WHERE idempotency_key = ?').get(idempotencyKey) as BatchOperationRecord | undefined;
+  return existing || null;
 }
 
 function processBatchResolve(
@@ -232,13 +261,15 @@ function processBatchResolve(
   reason: string,
   result: ManualResult,
   anomalyType?: AnomalyType,
-  filter?: BatchFilterCriteria
+  filter?: BatchFilterCriteria,
+  idempotencyKey?: string
 ): BatchOperationResponse {
   const batchOperationId = genId('batch');
   const now = new Date().toISOString();
   const success: BatchOperationResultItem[] = [];
   const skipped: BatchOperationResultItem[] = [];
   const failed: BatchOperationResultItem[] = [];
+  const pendingItems: PendingResultItem[] = [];
   const uniqueIds = Array.from(new Set(anomalyIds));
 
   logInfo('Batch resolve starting (core)', {
@@ -258,6 +289,7 @@ function processBatchResolve(
           error: '异常不存在',
           skip_reason: 'not_found',
         });
+        pendingItems.push({ anomalyId: id, dishName: null, statusBefore: null, resultBefore: null, outcome: 'skipped', skipReason: 'not_found', errorMessage: '异常不存在' });
         continue;
       }
 
@@ -285,6 +317,7 @@ function processBatchResolve(
           previous_result: anomaly.manual_result,
           dish_name: dishName,
         });
+        pendingItems.push({ anomalyId: id, dishName: dishName || null, statusBefore: anomaly.status, resultBefore: anomaly.manual_result, outcome: 'skipped', skipReason: srCode, errorMessage: skipReasonToLabel(srCode) });
         continue;
       }
 
@@ -317,6 +350,7 @@ function processBatchResolve(
       try {
         tx();
         success.push({ id, success: true, dish_name: dishName });
+        pendingItems.push({ anomalyId: id, dishName: dishName || null, statusBefore: 'unresolved', resultBefore: null, outcome: 'success', skipReason: null, errorMessage: null });
         logInfo('Batch resolve item success', { batchOperationId, anomalyId: id, dishName });
       } catch (txErr) {
         logWarn('Batch resolve item skipped after tx conflict', {
@@ -324,6 +358,7 @@ function processBatchResolve(
           anomalyId: id,
           error: (txErr as Error).message,
         });
+        const currentAnomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(id) as Anomaly | undefined;
         skipped.push({
           id,
           success: false,
@@ -331,6 +366,7 @@ function processBatchResolve(
           skip_reason: 'status_changed_by_other',
           dish_name: dishName,
         });
+        pendingItems.push({ anomalyId: id, dishName: dishName || null, statusBefore: currentAnomaly?.status || null, resultBefore: currentAnomaly?.manual_result || null, outcome: 'skipped', skipReason: 'status_changed_by_other', errorMessage: skipReasonToLabel('status_changed_by_other') });
       }
     } catch (err) {
       logError('Batch resolve failed for item', err as Error, { batchOperationId, anomalyId: id });
@@ -339,6 +375,7 @@ function processBatchResolve(
         success: false,
         error: (err as Error).message,
       });
+      pendingItems.push({ anomalyId: id, dishName: null, statusBefore: null, resultBefore: null, outcome: 'failed', skipReason: null, errorMessage: (err as Error).message });
     }
   }
 
@@ -354,8 +391,10 @@ function processBatchResolve(
       success.length,
       skipped.length,
       failed.length,
-      now
+      now,
+      idempotencyKey
     );
+    persistResultItems(batchOperationId, pendingItems);
   } catch (recErr) {
     logError('Failed to insert batch operation record', recErr as Error, { batchOperationId });
   }
@@ -387,13 +426,15 @@ function processBatchResolve(
 function processBatchReopen(
   anomalyIds: string[],
   reason: string,
-  filter?: BatchFilterCriteria
+  filter?: BatchFilterCriteria,
+  idempotencyKey?: string
 ): BatchOperationResponse {
   const batchOperationId = genId('batch');
   const now = new Date().toISOString();
   const success: BatchOperationResultItem[] = [];
   const skipped: BatchOperationResultItem[] = [];
   const failed: BatchOperationResultItem[] = [];
+  const pendingItems: PendingResultItem[] = [];
   const uniqueIds = Array.from(new Set(anomalyIds));
   const appliedReason = reason || '批量撤销关闭';
 
@@ -413,6 +454,7 @@ function processBatchReopen(
           error: '异常不存在',
           skip_reason: 'not_found',
         });
+        pendingItems.push({ anomalyId: id, dishName: null, statusBefore: null, resultBefore: null, outcome: 'skipped', skipReason: 'not_found', errorMessage: '异常不存在' });
         continue;
       }
 
@@ -440,6 +482,7 @@ function processBatchReopen(
           previous_result: anomaly.manual_result,
           dish_name: dishName,
         });
+        pendingItems.push({ anomalyId: id, dishName: dishName || null, statusBefore: anomaly.status, resultBefore: anomaly.manual_result, outcome: 'skipped', skipReason: srCode, errorMessage: skipReasonToLabel(srCode) });
         continue;
       }
 
@@ -466,6 +509,7 @@ function processBatchReopen(
       try {
         tx();
         success.push({ id, success: true, dish_name: dishName });
+        pendingItems.push({ anomalyId: id, dishName: dishName || null, statusBefore: 'resolved', resultBefore: anomaly.manual_result, outcome: 'success', skipReason: null, errorMessage: null });
         logInfo('Batch reopen item success', { batchOperationId, anomalyId: id, dishName });
       } catch (txErr) {
         logWarn('Batch reopen item skipped after tx conflict', {
@@ -473,6 +517,7 @@ function processBatchReopen(
           anomalyId: id,
           error: (txErr as Error).message,
         });
+        const currentAnomaly = db.prepare('SELECT * FROM anomalies WHERE id = ?').get(id) as Anomaly | undefined;
         skipped.push({
           id,
           success: false,
@@ -480,6 +525,7 @@ function processBatchReopen(
           skip_reason: 'status_changed_by_other',
           dish_name: dishName,
         });
+        pendingItems.push({ anomalyId: id, dishName: dishName || null, statusBefore: currentAnomaly?.status || null, resultBefore: currentAnomaly?.manual_result || null, outcome: 'skipped', skipReason: 'status_changed_by_other', errorMessage: skipReasonToLabel('status_changed_by_other') });
       }
     } catch (err) {
       logError('Batch reopen failed for item', err as Error, { batchOperationId, anomalyId: id });
@@ -488,6 +534,7 @@ function processBatchReopen(
         success: false,
         error: (err as Error).message,
       });
+      pendingItems.push({ anomalyId: id, dishName: null, statusBefore: null, resultBefore: null, outcome: 'failed', skipReason: null, errorMessage: (err as Error).message });
     }
   }
 
@@ -503,8 +550,10 @@ function processBatchReopen(
       success.length,
       skipped.length,
       failed.length,
-      now
+      now,
+      idempotencyKey
     );
+    persistResultItems(batchOperationId, pendingItems);
   } catch (recErr) {
     logError('Failed to insert batch operation record', recErr as Error, { batchOperationId });
   }
@@ -782,12 +831,14 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
     result,
     anomaly_type,
     filter,
+    idempotency_key,
   } = req.body as {
     anomaly_ids: string[];
     reason: string;
     result: ManualResult;
     anomaly_type?: AnomalyType;
     filter?: BatchFilterCriteria;
+    idempotency_key?: string;
   };
 
   logInfo('Batch resolve request received', {
@@ -796,7 +847,31 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
     hasReason: !!reason,
     hasTypeOverride: !!anomaly_type,
     hasFilter: !!filter,
+    hasIdempotencyKey: !!idempotency_key,
   });
+
+  if (idempotency_key) {
+    const existing = checkIdempotencyKey(idempotency_key);
+    if (existing) {
+      logInfo('Batch resolve idempotency hit, returning existing result', { idempotency_key, existingId: existing.id });
+      const items = db.prepare('SELECT * FROM batch_result_items WHERE batch_operation_id = ?').all(existing.id) as BatchResultItem[];
+      const successItems = items.filter(i => i.outcome === 'success').map(i => ({ id: i.anomaly_id, success: true, dish_name: i.dish_name }));
+      const skippedItems = items.filter(i => i.outcome === 'skipped').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '', skip_reason: i.skip_reason as SkipReasonCode | undefined, dish_name: i.dish_name }));
+      const failedItems = items.filter(i => i.outcome === 'failed').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '' }));
+      const cached: BatchOperationResponse = {
+        batch_operation_id: existing.id,
+        success: successItems,
+        skipped: skippedItems,
+        failed: failedItems,
+        total_submitted: existing.total_submitted,
+        action: existing.action,
+        applied_result: existing.applied_result,
+        applied_reason: existing.applied_reason,
+        timestamp: existing.timestamp,
+      };
+      return res.json(cached);
+    }
+  }
 
   if (!anomaly_ids || !Array.isArray(anomaly_ids) || anomaly_ids.length === 0) {
     logWarn('Batch resolve failed: empty anomaly ids');
@@ -811,17 +886,18 @@ router.post('/batch-resolve', (req: Request, res: Response) => {
     return res.status(400).json({ error: '异常类型无效' });
   }
 
-  const response = processBatchResolve(anomaly_ids, reason, result, anomaly_type, filter);
+  const response = processBatchResolve(anomaly_ids, reason, result, anomaly_type, filter, idempotency_key);
   logOperation('batch_resolve', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
   res.json(response);
 });
 
 router.post('/batch-resolve-by-filter', (req: Request, res: Response) => {
-  const { filter, reason, result, anomaly_type } = req.body as {
+  const { filter, reason, result, anomaly_type, idempotency_key } = req.body as {
     filter: BatchFilterCriteria;
     reason: string;
     result: ManualResult;
     anomaly_type?: AnomalyType;
+    idempotency_key?: string;
   };
 
   logInfo('Batch resolve by filter request received', {
@@ -829,7 +905,31 @@ router.post('/batch-resolve-by-filter', (req: Request, res: Response) => {
     result,
     hasReason: !!reason,
     hasTypeOverride: !!anomaly_type,
+    hasIdempotencyKey: !!idempotency_key,
   });
+
+  if (idempotency_key) {
+    const existing = checkIdempotencyKey(idempotency_key);
+    if (existing) {
+      logInfo('Batch resolve by filter idempotency hit', { idempotency_key, existingId: existing.id });
+      const items = db.prepare('SELECT * FROM batch_result_items WHERE batch_operation_id = ?').all(existing.id) as BatchResultItem[];
+      const successItems = items.filter(i => i.outcome === 'success').map(i => ({ id: i.anomaly_id, success: true, dish_name: i.dish_name }));
+      const skippedItems = items.filter(i => i.outcome === 'skipped').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '', skip_reason: i.skip_reason as SkipReasonCode | undefined, dish_name: i.dish_name }));
+      const failedItems = items.filter(i => i.outcome === 'failed').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '' }));
+      const cached: BatchOperationResponse = {
+        batch_operation_id: existing.id,
+        success: successItems,
+        skipped: skippedItems,
+        failed: failedItems,
+        total_submitted: existing.total_submitted,
+        action: existing.action,
+        applied_result: existing.applied_result,
+        applied_reason: existing.applied_reason,
+        timestamp: existing.timestamp,
+      };
+      return res.json(cached);
+    }
+  }
 
   if (!filter || Object.keys(filter).length === 0) {
     logWarn('Batch resolve by filter failed: empty filter');
@@ -870,7 +970,7 @@ router.post('/batch-resolve-by-filter', (req: Request, res: Response) => {
       return res.json(emptyResponse);
     }
 
-    const response = processBatchResolve(anomalyIds, reason, result, anomaly_type, filter);
+    const response = processBatchResolve(anomalyIds, reason, result, anomaly_type, filter, idempotency_key);
     logOperation('batch_resolve_by_filter', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
     res.json(response);
   } catch (err) {
@@ -930,17 +1030,43 @@ router.post('/batch-reopen', (req: Request, res: Response) => {
     anomaly_ids,
     reason,
     filter,
+    idempotency_key,
   } = req.body as {
     anomaly_ids: string[];
     reason?: string;
     filter?: BatchFilterCriteria;
+    idempotency_key?: string;
   };
 
   logInfo('Batch reopen request received', {
     count: anomaly_ids?.length || 0,
     hasReason: !!reason,
     hasFilter: !!filter,
+    hasIdempotencyKey: !!idempotency_key,
   });
+
+  if (idempotency_key) {
+    const existing = checkIdempotencyKey(idempotency_key);
+    if (existing) {
+      logInfo('Batch reopen idempotency hit', { idempotency_key, existingId: existing.id });
+      const items = db.prepare('SELECT * FROM batch_result_items WHERE batch_operation_id = ?').all(existing.id) as BatchResultItem[];
+      const successItems = items.filter(i => i.outcome === 'success').map(i => ({ id: i.anomaly_id, success: true, dish_name: i.dish_name }));
+      const skippedItems = items.filter(i => i.outcome === 'skipped').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '', skip_reason: i.skip_reason as SkipReasonCode | undefined, dish_name: i.dish_name }));
+      const failedItems = items.filter(i => i.outcome === 'failed').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '' }));
+      const cached: BatchOperationResponse = {
+        batch_operation_id: existing.id,
+        success: successItems,
+        skipped: skippedItems,
+        failed: failedItems,
+        total_submitted: existing.total_submitted,
+        action: existing.action,
+        applied_result: existing.applied_result as ManualResult,
+        applied_reason: existing.applied_reason,
+        timestamp: existing.timestamp,
+      };
+      return res.json(cached);
+    }
+  }
 
   if (!anomaly_ids || !Array.isArray(anomaly_ids) || anomaly_ids.length === 0) {
     logWarn('Batch reopen failed: empty anomaly ids');
@@ -948,21 +1074,46 @@ router.post('/batch-reopen', (req: Request, res: Response) => {
   }
 
   const appliedReason = reason || '批量撤销关闭';
-  const response = processBatchReopen(anomaly_ids, appliedReason, filter);
+  const response = processBatchReopen(anomaly_ids, appliedReason, filter, idempotency_key);
   logOperation('batch_reopen', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
   res.json(response);
 });
 
 router.post('/batch-reopen-by-filter', (req: Request, res: Response) => {
-  const { filter, reason } = req.body as {
+  const { filter, reason, idempotency_key } = req.body as {
     filter: BatchFilterCriteria;
     reason?: string;
+    idempotency_key?: string;
   };
 
   logInfo('Batch reopen by filter request received', {
     filterKeys: Object.keys(filter || {}),
     hasReason: !!reason,
+    hasIdempotencyKey: !!idempotency_key,
   });
+
+  if (idempotency_key) {
+    const existing = checkIdempotencyKey(idempotency_key);
+    if (existing) {
+      logInfo('Batch reopen by filter idempotency hit', { idempotency_key, existingId: existing.id });
+      const items = db.prepare('SELECT * FROM batch_result_items WHERE batch_operation_id = ?').all(existing.id) as BatchResultItem[];
+      const successItems = items.filter(i => i.outcome === 'success').map(i => ({ id: i.anomaly_id, success: true, dish_name: i.dish_name }));
+      const skippedItems = items.filter(i => i.outcome === 'skipped').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '', skip_reason: i.skip_reason as SkipReasonCode | undefined, dish_name: i.dish_name }));
+      const failedItems = items.filter(i => i.outcome === 'failed').map(i => ({ id: i.anomaly_id, success: false, error: i.error_message || '' }));
+      const cached: BatchOperationResponse = {
+        batch_operation_id: existing.id,
+        success: successItems,
+        skipped: skippedItems,
+        failed: failedItems,
+        total_submitted: existing.total_submitted,
+        action: existing.action,
+        applied_result: existing.applied_result as ManualResult,
+        applied_reason: existing.applied_reason,
+        timestamp: existing.timestamp,
+      };
+      return res.json(cached);
+    }
+  }
 
   if (!filter || Object.keys(filter).length === 0) {
     logWarn('Batch reopen by filter failed: empty filter');
@@ -996,7 +1147,7 @@ router.post('/batch-reopen-by-filter', (req: Request, res: Response) => {
     }
 
     const appliedReason = reason || '批量撤销关闭';
-    const response = processBatchReopen(anomalyIds, appliedReason, filter);
+    const response = processBatchReopen(anomalyIds, appliedReason, filter, idempotency_key);
     logOperation('batch_reopen_by_filter', 'batch_op', response.batch_operation_id, `success=${response.success.length}, skipped=${response.skipped.length}, failed=${response.failed.length}`, filter);
     res.json(response);
   } catch (err) {

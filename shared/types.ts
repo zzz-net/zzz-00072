@@ -137,6 +137,7 @@ export interface BatchResolveRequest {
   anomaly_type?: AnomalyType;
   filter?: BatchFilterCriteria;
   preview_token?: string;
+  idempotency_key?: string;
 }
 
 export interface BatchReopenRequest {
@@ -144,6 +145,7 @@ export interface BatchReopenRequest {
   reason?: string;
   filter?: BatchFilterCriteria;
   preview_token?: string;
+  idempotency_key?: string;
 }
 
 export interface BatchFilterResolveRequest {
@@ -151,11 +153,13 @@ export interface BatchFilterResolveRequest {
   reason: string;
   result: ManualResult;
   anomaly_type?: AnomalyType;
+  idempotency_key?: string;
 }
 
 export interface BatchFilterReopenRequest {
   filter: BatchFilterCriteria;
   reason?: string;
+  idempotency_key?: string;
 }
 
 export interface BatchOperationResponse {
@@ -184,6 +188,33 @@ export interface BatchOperationRecord {
   failed_count: number;
   operator: string;
   timestamp: string;
+  idempotency_key?: string | null;
+}
+
+export interface BatchResultItem {
+  id: string;
+  batch_operation_id: string;
+  anomaly_id: string;
+  dish_name: string | null;
+  status_before: AnomalyStatus | null;
+  result_before: ManualResult;
+  outcome: 'success' | 'skipped' | 'failed';
+  skip_reason: SkipReasonCode | null;
+  error_message: string | null;
+}
+
+export interface BatchOperationDetail {
+  operation: BatchOperationRecord;
+  items: BatchResultItem[];
+  history: ReviewHistory[];
+  current_unresolved_count: number;
+}
+
+export interface ResultCenterConfig {
+  action_filter: 'all' | 'resolve' | 'reopen';
+  outcome_filter: 'all' | 'success' | 'skipped' | 'failed';
+  time_start: string;
+  time_end: string;
 }
 
 export interface OperationLog {

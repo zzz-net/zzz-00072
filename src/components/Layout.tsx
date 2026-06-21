@@ -1,5 +1,5 @@
 import { NavLink, Outlet } from 'react-router-dom';
-import { Package, ClipboardCheck, Settings, Download, Scale, AlertCircle, CheckCircle2 } from 'lucide-react';
+import { Package, ClipboardCheck, Settings, Download, Scale, AlertCircle, CheckCircle2, ClipboardList } from 'lucide-react';
 import { useAppStore } from '@/stores';
 
 export default function Layout() {
@@ -8,6 +8,7 @@ export default function Layout() {
   const navItems = [
     { to: '/batches', label: '批次列表', icon: Package },
     { to: '/rules', label: '规则配置', icon: Settings },
+    { to: '/result-center', label: '结果中心', icon: ClipboardList },
     { to: '/export', label: '报表导出', icon: Download },
   ];
 

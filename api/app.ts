@@ -16,6 +16,7 @@ import batchRoutes from './routes/batches.js'
 import anomalyRoutes from './routes/anomalies.js'
 import ruleRoutes from './routes/rules.js'
 import exportRoutes from './routes/export.js'
+import resultCenterRoutes from './routes/resultCenter.js'
 
 // for esm mode
 const __filename = fileURLToPath(import.meta.url)
@@ -38,6 +39,7 @@ app.use('/api/batches', batchRoutes)
 app.use('/api/anomalies', anomalyRoutes)
 app.use('/api/rules', ruleRoutes)
 app.use('/api/export', exportRoutes)
+app.use('/api/result-center', resultCenterRoutes)
 
 /**
  * health
